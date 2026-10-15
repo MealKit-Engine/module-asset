@@ -288,7 +288,7 @@ render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 posi
 u64 ModelCache::hashModels(const scene::Scene& scene) {
     Hasher h;
     for (const scene::Entity& e : scene.entities) {
-        if (e.model.empty() || e.kind == scene::EntityKind::Decoration) continue;
+        if (e.model.empty() || e.is(scene::kTypeDecoration)) continue;
         const Model* model = get(e.model);
         h.add(model ? model->fileHash : 0ull);
     }
