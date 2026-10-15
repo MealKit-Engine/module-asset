@@ -1,8 +1,8 @@
 #pragma once
 
-#include "aster/core/Math.h"
-#include "aster/render/Renderer.h"
-#include "aster/scene/Scene.h"
+#include "mealkit/core/Math.h"
+#include "mealkit/render/Renderer.h"
+#include "mealkit/scene/Scene.h"
 
 #include <memory>
 #include <string>
@@ -12,7 +12,7 @@
 // glTF(.glb/.gltf) 모델 불러오기와 캐시.
 // 불러올 때 meshoptimizer로 정점 중복 제거, 캐시/오버드로/페치 최적화를 하고 LOD를 최대 2단계 더 만든다.
 // 물리용 볼록 껍질 점(hullPoints)은 파일의 정점에서 바로 뽑아 모든 PC에서 같다.
-namespace aster::asset {
+namespace mealkit::asset {
 
 inline constexpr u32 kMaxLods = 3;
 
@@ -22,7 +22,7 @@ struct Model {
     render::MeshId lods[kMaxLods] = {};
     u32 lodCount = 0;
     u32 triangles[kMaxLods] = {};
-    Vec3 boundsMin, boundsMax;     // 모델 공간 (Aster 좌표계: 왼손, y 위)
+    Vec3 boundsMin, boundsMax;     // 모델 공간 (MealKit 좌표계: 왼손, y 위)
     std::vector<Vec3> hullPoints;  // 물리 볼록 껍질용
     u64 fileHash = 0;              // 원본 파일 내용 해시 (멀티플레이 검사용)
 };
@@ -51,4 +51,4 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
 };
 
-} // namespace aster::asset
+} // namespace mealkit::asset

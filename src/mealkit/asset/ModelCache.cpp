@@ -1,9 +1,9 @@
-#include "aster/asset/ModelCache.h"
+#include "mealkit/asset/ModelCache.h"
 
-#include "aster/core/Hash.h"
-#include "aster/core/Log.h"
-#include "aster/core/Profile.h"
-#include "aster/platform/Paths.h"
+#include "mealkit/core/Hash.h"
+#include "mealkit/core/Log.h"
+#include "mealkit/core/Profile.h"
+#include "mealkit/platform/Paths.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,7 +18,7 @@
 #pragma warning(pop)
 #include <meshoptimizer.h>
 
-namespace aster::asset {
+namespace mealkit::asset {
 namespace {
 
 using render::MeshData;
@@ -95,7 +95,7 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
         const Vec3 wn = normalize(Vec3{m[0] * n[0] + m[4] * n[1] + m[8] * n[2], m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
                                        m[2] * n[0] + m[6] * n[1] + m[10] * n[2]});
         const f32 color[4] = {base[0] * c[0], base[1] * c[1], base[2] * c[2], base[3] * c[3]};
-        // glTF는 오른손 좌표계: z를 뒤집어 Aster(왼손)로 바꾼다
+        // glTF는 오른손 좌표계: z를 뒤집어 MealKit(왼손)로 바꾼다
         out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(color)});
     }
     const cgltf_size indexCount = prim.indices ? prim.indices->count : positions->count;
@@ -171,7 +171,7 @@ bool makeLod(const MeshData& source, f32 ratio, f32 maxError, MeshData& out) {
 }
 
 bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model, std::string& error) {
-    ASTER_ZONE("Load glTF");
+    MEALKIT_ZONE("Load glTF");
     cgltf_options options{};
     options.file.read = readFile;
     options.file.release = releaseFile;
@@ -260,10 +260,10 @@ const Model* ModelCache::get(const std::string& path) {
             if (m_renderer) model->lods[i] = m_renderer->createMesh(lods[i]);
         }
         model->valid = true;
-        ASTER_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model->triangles[0], model->lodCount,
+        MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model->triangles[0], model->lodCount,
                    model->lodCount > 1 ? "" : " (too simple to reduce)");
     } else {
-        ASTER_WARN("Model %s: %s", path.c_str(), error.c_str());
+        MEALKIT_WARN("Model %s: %s", path.c_str(), error.c_str());
     }
     const Model* result = model->valid ? model.get() : nullptr;
     m_models.emplace(path, std::move(model));
@@ -295,4 +295,4 @@ u64 ModelCache::hashModels(const scene::Scene& scene) {
     return h.value;
 }
 
-} // namespace aster::asset
+} // namespace mealkit::asset
