@@ -18,13 +18,13 @@ inline constexpr u32 kMaxLods = 3;
 
 struct Model {
     bool valid = false;
-    std::string path;              // 씬에 적힌 경로 (assets 기준 상대 경로)
+    std::string path; // 씬에 적힌 경로 (assets 기준 상대 경로)
     render::MeshId lods[kMaxLods] = {};
     u32 lodCount = 0;
     u32 triangles[kMaxLods] = {};
-    Vec3 boundsMin, boundsMax;     // 모델 공간 (MealKit 좌표계: 왼손, y 위)
-    std::vector<Vec3> hullPoints;  // 물리 볼록 껍질용
-    u64 fileHash = 0;              // 원본 파일 내용 해시 (멀티플레이 검사용)
+    Vec3 boundsMin, boundsMax;    // 모델 공간 (MealKit 좌표계: 왼손, y 위)
+    std::vector<Vec3> hullPoints; // 물리 볼록 껍질용
+    u64 fileHash = 0;             // 원본 파일 내용 해시 (멀티플레이 검사용)
 };
 
 class ModelCache {
@@ -43,7 +43,7 @@ public:
     u64 hashModels(const scene::Scene& scene);
 
     static std::string resolve(const std::string& path); // assets 기준 경로 → 실제 파일 경로
-    static std::string assetsRoot();                      // 저장소/실행 파일 근처의 assets 폴더
+    static std::string assetsRoot();                     // 저장소/실행 파일 근처의 assets 폴더
 
 private:
     render::Renderer* m_renderer = nullptr;

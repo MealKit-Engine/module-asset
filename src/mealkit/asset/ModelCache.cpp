@@ -34,7 +34,8 @@ std::wstring widen(const char* s) {
 }
 
 // cgltf의 파일 읽기를 UTF-8 경로(한글 폴더)에서도 동작하게 바꾼다.
-cgltf_result readFile(const cgltf_memory_options*, const cgltf_file_options*, const char* path, cgltf_size* size, void** data) {
+cgltf_result readFile(const cgltf_memory_options*, const cgltf_file_options*, const char* path, cgltf_size* size,
+                      void** data) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, widen(path).c_str(), L"rb") != 0 || !f) return cgltf_result_file_not_found;
     fseek(f, 0, SEEK_END);
@@ -82,7 +83,8 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
 
     // 열 우선(column-major) 행렬. 행렬식이 음수면 거울 변환이라 감는 순서를 한 번 더 뒤집는다.
     const f32* m = world;
-    const f32 det = m[0] * (m[5] * m[10] - m[9] * m[6]) - m[4] * (m[1] * m[10] - m[9] * m[2]) + m[8] * (m[1] * m[6] - m[5] * m[2]);
+    const f32 det =
+        m[0] * (m[5] * m[10] - m[9] * m[6]) - m[4] * (m[1] * m[10] - m[9] * m[2]) + m[8] * (m[1] * m[6] - m[5] * m[2]);
 
     const u32 base0 = static_cast<u32>(out.vertices.size());
     for (cgltf_size i = 0; i < positions->count; ++i) {
@@ -114,7 +116,8 @@ void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals) {
     if (node->mesh) {
         f32 world[16];
         cgltf_node_transform_world(node, world);
-        for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) appendPrimitive(node->mesh->primitives[i], world, out, hadNormals);
+        for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i)
+            appendPrimitive(node->mesh->primitives[i], world, out, hadNormals);
     }
     for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals);
 }
@@ -136,10 +139,11 @@ void computeNormals(MeshData& mesh) {
 void optimize(MeshData& mesh) {
     const size_t indexCount = mesh.indices.size();
     std::vector<u32> remap(mesh.vertices.size());
-    const size_t unique = meshopt_generateVertexRemap(remap.data(), mesh.indices.data(), indexCount, mesh.vertices.data(),
-                                                      mesh.vertices.size(), sizeof(Vertex));
+    const size_t unique = meshopt_generateVertexRemap(remap.data(), mesh.indices.data(), indexCount,
+                                                      mesh.vertices.data(), mesh.vertices.size(), sizeof(Vertex));
     std::vector<Vertex> vertices(unique);
-    meshopt_remapVertexBuffer(vertices.data(), mesh.vertices.data(), mesh.vertices.size(), sizeof(Vertex), remap.data());
+    meshopt_remapVertexBuffer(vertices.data(), mesh.vertices.data(), mesh.vertices.size(), sizeof(Vertex),
+                              remap.data());
     meshopt_remapIndexBuffer(mesh.indices.data(), mesh.indices.data(), indexCount, remap.data());
     meshopt_optimizeVertexCache(mesh.indices.data(), mesh.indices.data(), indexCount, unique);
     meshopt_optimizeOverdraw(mesh.indices.data(), mesh.indices.data(), indexCount, &vertices[0].position.x, unique,
@@ -155,9 +159,9 @@ bool makeLod(const MeshData& source, f32 ratio, f32 maxError, MeshData& out) {
     const size_t target = static_cast<size_t>(static_cast<f32>(source.indices.size()) * ratio) / 3 * 3;
     std::vector<u32> indices(source.indices.size());
     f32 error = 0.0f;
-    const size_t count = meshopt_simplify(indices.data(), source.indices.data(), source.indices.size(),
-                                          &source.vertices[0].position.x, source.vertices.size(), sizeof(Vertex), target,
-                                          maxError, 0, &error);
+    const size_t count =
+        meshopt_simplify(indices.data(), source.indices.data(), source.indices.size(), &source.vertices[0].position.x,
+                         source.vertices.size(), sizeof(Vertex), target, maxError, 0, &error);
     if (count < 3 || count > source.indices.size() * 8 / 10) return false;
     indices.resize(count);
     meshopt_optimizeVertexCache(indices.data(), indices.data(), count, source.vertices.size());
@@ -212,8 +216,10 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     model.boundsMin = {1e30f, 1e30f, 1e30f};
     model.boundsMax = {-1e30f, -1e30f, -1e30f};
     for (const Vertex& v : mesh.vertices) {
-        model.boundsMin = {std::min(model.boundsMin.x, v.position.x), std::min(model.boundsMin.y, v.position.y), std::min(model.boundsMin.z, v.position.z)};
-        model.boundsMax = {std::max(model.boundsMax.x, v.position.x), std::max(model.boundsMax.y, v.position.y), std::max(model.boundsMax.z, v.position.z)};
+        model.boundsMin = {std::min(model.boundsMin.x, v.position.x), std::min(model.boundsMin.y, v.position.y),
+                           std::min(model.boundsMin.z, v.position.z)};
+        model.boundsMax = {std::max(model.boundsMax.x, v.position.x), std::max(model.boundsMax.y, v.position.y),
+                           std::max(model.boundsMax.z, v.position.z)};
     }
     const size_t stride = std::max<size_t>(1, mesh.vertices.size() / kMaxHullPoints);
     for (size_t i = 0; i < mesh.vertices.size(); i += stride) model.hullPoints.push_back(mesh.vertices[i].position);
@@ -261,7 +267,7 @@ const Model* ModelCache::get(const std::string& path) {
         }
         model->valid = true;
         MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model->triangles[0], model->lodCount,
-                   model->lodCount > 1 ? "" : " (too simple to reduce)");
+                     model->lodCount > 1 ? "" : " (too simple to reduce)");
     } else {
         MEALKIT_WARN("Model %s: %s", path.c_str(), error.c_str());
     }
