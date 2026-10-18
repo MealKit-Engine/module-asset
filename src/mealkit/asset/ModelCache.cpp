@@ -10,7 +10,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <windows.h>
 
 #pragma warning(push, 0)
 #define CGLTF_IMPLEMENTATION
@@ -26,18 +25,11 @@ using render::Vertex;
 
 constexpr u32 kMaxHullPoints = 1024;
 
-std::wstring widen(const char* s) {
-    const int len = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
-    std::wstring out(len > 0 ? len - 1 : 0, L'\0');
-    if (len > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, out.data(), len);
-    return out;
-}
-
 // cgltf의 파일 읽기를 UTF-8 경로(한글 폴더)에서도 동작하게 바꾼다.
 cgltf_result readFile(const cgltf_memory_options*, const cgltf_file_options*, const char* path, cgltf_size* size,
                       void** data) {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, widen(path).c_str(), L"rb") != 0 || !f) return cgltf_result_file_not_found;
+    FILE* f = openFile(path, "rb");
+    if (!f) return cgltf_result_file_not_found;
     fseek(f, 0, SEEK_END);
     const long length = ftell(f);
     fseek(f, 0, SEEK_SET);
