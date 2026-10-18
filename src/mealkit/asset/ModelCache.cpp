@@ -232,7 +232,7 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
 std::string ModelCache::assetsRoot() {
     const std::string found = findAsset("assets");
     if (!found.empty()) return found;
-    return (projectRoot().empty() ? executableDirectory() : projectRoot()) + "\\assets";
+    return (projectRoot().empty() ? executableDirectory() : projectRoot()) + "/assets";
 }
 
 std::string ModelCache::resolve(const std::string& path) {
@@ -255,7 +255,7 @@ const Model* ModelCache::get(const std::string& path) {
         model->lodCount = static_cast<u32>(lods.size());
         for (u32 i = 0; i < model->lodCount; ++i) {
             model->triangles[i] = static_cast<u32>(lods[i].indices.size() / 3);
-            if (m_renderer) model->lods[i] = m_renderer->createMesh(lods[i]);
+            if (m_upload) model->lods[i] = uploadMesh(lods[i]);
         }
         model->valid = true;
         MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model->triangles[0], model->lodCount,
@@ -269,7 +269,7 @@ const Model* ModelCache::get(const std::string& path) {
 }
 
 render::MeshId ModelCache::boxMesh() {
-    if (m_box == 0xFFFFFFFFu && m_renderer) m_box = m_renderer->createMesh(render::makeBox());
+    if (m_box == 0xFFFFFFFFu && m_upload) m_box = uploadMesh(render::makeBox());
     return m_box;
 }
 

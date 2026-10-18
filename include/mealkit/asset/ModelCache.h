@@ -29,8 +29,14 @@ struct Model {
 
 class ModelCache {
 public:
-    // renderer가 없으면 CPU 데이터(경계, 껍질, 해시)만 만든다.
-    void setRenderer(render::Renderer* renderer) { m_renderer = renderer; }
+    // renderer가 없으면 CPU 데이터(경계, 껍질, 해시)만 만든다 (헤드리스).
+    // 렌더러 호출은 이 인라인 함수 안에만 있어, 부르지 않는 헤드리스 빌드는 렌더러 없이 링크된다.
+    void setRenderer(render::Renderer* renderer) {
+        m_uploadContext = renderer;
+        m_upload = renderer ? [](void* r, const render::MeshData& mesh) {
+            return static_cast<render::Renderer*>(r)->createMesh(mesh);
+        } : nullptr;
+    }
 
     // 처음 요청 때 불러오고 이후에는 캐시에서 준다. 실패하면 nullptr (같은 경로는 다시 시도하지 않음).
     const Model* get(const std::string& path);
@@ -46,7 +52,10 @@ public:
     static std::string assetsRoot();                     // 저장소/실행 파일 근처의 assets 폴더
 
 private:
-    render::Renderer* m_renderer = nullptr;
+    render::MeshId uploadMesh(const render::MeshData& mesh) { return m_upload(m_uploadContext, mesh); }
+
+    render::MeshId (*m_upload)(void*, const render::MeshData&) = nullptr;
+    void* m_uploadContext = nullptr;
     render::MeshId m_box = 0xFFFFFFFFu;
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
 };
