@@ -241,6 +241,28 @@ std::string ModelCache::resolve(const std::string& path) {
     return findAsset("assets/" + path);
 }
 
+std::string modelSchemaJson() {
+    // 불러오기(loadGltf)가 읽는 것과 같게: 삼각형, POSITION·NORMAL·COLOR_0, 재질의 baseColorFactor. 노드 변환을 구워 메시 하나로 합친다
+    std::string s = R"({
+  "schemaVersion": 1,
+  "blender": "5.2",
+  "model": {
+    "format": "glb",
+    "folder": "models",
+    "attributes": ["POSITION", "NORMAL", "COLOR_0"],
+    "mergesMeshes": true,
+    "maxLods": )" + std::to_string(kMaxLods) + R"(,
+    "material": {"baseColorFactor": true, "vertexColor": true, "textures": false},
+    "skinning": false,
+    "animation": false
+  },
+  "materialFeatures": []
+}
+)";
+    // materialFeatures: 머티리얼 extras 기능 (스타일 프리셋의 외곽선·바람·림·디졸브는 "텍스처와 머티리얼" 항목에서 더한다)
+    return s;
+}
+
 const Model* ModelCache::get(const std::string& path) {
     if (path.empty()) return nullptr;
     auto it = m_models.find(path);

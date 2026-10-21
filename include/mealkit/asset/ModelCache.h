@@ -27,6 +27,10 @@ struct Model {
     u64 fileHash = 0;             // 원본 파일 내용 해시 (멀티플레이 검사용)
 };
 
+// 모델 지원 범위를 외부 도구에 알리는 스키마 (JSON). Blender 애드온(tools/blender-addon/mealkit/schema.json)이 읽고,
+// 단위 테스트 asset_schema가 그 파일이 이것과 같은지 본다 (엔진과 애드온이 어긋나지 않게). 불러오기가 바뀌면 같이 고친다
+std::string modelSchemaJson();
+
 class ModelCache {
 public:
     // renderer가 없으면 CPU 데이터(경계, 껍질, 해시)만 만든다 (헤드리스).
