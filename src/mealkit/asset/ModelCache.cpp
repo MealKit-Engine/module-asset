@@ -188,6 +188,15 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     fileHash.bytes(data->json, data->json_size);
     model.fileHash = fileHash.value;
 
+    // 예산용: 메시가 쓰는 서로 다른 재질 수 (재질 없는 프리미티브는 기본 재질 하나)
+    std::vector<const cgltf_material*> used;
+    for (cgltf_size i = 0; i < data->meshes_count; ++i)
+        for (cgltf_size p = 0; p < data->meshes[i].primitives_count; ++p) {
+            const cgltf_material* m = data->meshes[i].primitives[p].material;
+            if (std::find(used.begin(), used.end(), m) == used.end()) used.push_back(m);
+        }
+    model.materials = static_cast<u32>(used.size());
+
     MeshData mesh;
     bool hadNormals = true;
     const cgltf_scene* sceneNode = data->scene ? data->scene : (data->scenes_count ? &data->scenes[0] : nullptr);
@@ -241,6 +250,22 @@ std::string ModelCache::resolve(const std::string& path) {
     return findAsset("assets/" + path);
 }
 
+namespace {
+// 스키마의 예산 종류: 폴더, mealkit.project 키 접두사, 기본 한도 (애드온은 프로젝트 파일 값이 없으면 이것)
+std::string budgetsJson() {
+    std::string s;
+    const char* keys[kModelKindCount] = {"budgetCharacters", "budgetProps", "budgetEnvironment"};
+    for (u32 k = 0; k < kModelKindCount; ++k) {
+        const ModelBudget& b = kDefaultBudgets[k];
+        if (k) s += ",";
+        s += "\n      {\"folder\": \"" + std::string(modelKindFolder(static_cast<ModelKind>(k))) + "\", \"key\": \"" + keys[k] +
+             "\", \"triangles\": " + std::to_string(b.triangles) + ", \"textureSize\": " + std::to_string(b.textureSize) +
+             ", \"bones\": " + std::to_string(b.bones) + ", \"materials\": " + std::to_string(b.materials) + "}";
+    }
+    return s + "\n    ";
+}
+} // namespace
+
 std::string modelSchemaJson() {
     // 불러오기(loadGltf)가 읽는 것과 같게: 삼각형, POSITION·NORMAL·COLOR_0, 재질의 baseColorFactor. 노드 변환을 구워 메시 하나로 합친다
     std::string s = R"({
@@ -256,7 +281,11 @@ std::string modelSchemaJson() {
     "skinning": false,
     "animation": false
   },
-  "materialFeatures": []
+  "materialFeatures": [],
+  "budgets": {
+    "kinds": [)" + budgetsJson() + R"(],
+    "otherFolders": "props"
+  }
 }
 )";
     // materialFeatures: 머티리얼 extras 기능 (스타일 프리셋의 외곽선·바람·림·디졸브는 "텍스처와 머티리얼" 항목에서 더한다)
@@ -293,10 +322,36 @@ bool ModelCache::load(const std::string& path, Model& out) {
         if (m_upload) model.lods[i] = uploadMesh(lods[i]);
     }
     model.valid = true;
+    model.kind = modelKind(path);
     MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model.triangles[0], model.lodCount,
                  model.lodCount > 1 ? "" : " (too simple to reduce)");
+    checkBudget(model);
     out = std::move(model);
     return true;
+}
+
+std::vector<std::string> budgetProblems(const Model& model, const ModelBudget& budget) {
+    std::vector<std::string> out;
+    const auto over = [&](u32 used, u32 limit, const char* what) {
+        if (used > limit) out.push_back(std::to_string(used) + " " + what + " (budget " + std::to_string(limit) + ")");
+    };
+    over(model.triangles[0], budget.triangles, "triangles");
+    over(model.materials, budget.materials, "materials");
+    over(model.bones, budget.bones, "bones");
+    over(model.textureSize, budget.textureSize, "px texture");
+    return out;
+}
+
+void ModelCache::checkBudget(Model& model) const {
+    model.budgetProblems = budgetProblems(model, budget(model.kind));
+    for (const std::string& p : model.budgetProblems)
+        MEALKIT_WARN("Model %s is over the %s budget: %s", model.path.c_str(), modelKindFolder(model.kind), p.c_str());
+}
+
+void ModelCache::setBudgets(const ModelBudget (&budgets)[kModelKindCount]) {
+    std::copy(std::begin(budgets), std::end(budgets), std::begin(m_budgets));
+    for (auto& [path, model] : m_models)
+        if (model->valid) checkBudget(*model);
 }
 
 std::vector<std::string> ModelCache::reloadChanged() {

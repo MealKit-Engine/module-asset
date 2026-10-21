@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mealkit/asset/Budget.h"
 #include "mealkit/core/Math.h"
 #include "mealkit/render/Renderer.h"
 #include "mealkit/scene/Scene.h"
@@ -25,7 +26,16 @@ struct Model {
     Vec3 boundsMin, boundsMax;    // 모델 공간 (MealKit 좌표계: 왼손, y 위)
     std::vector<Vec3> hullPoints; // 물리 볼록 껍질용
     u64 fileHash = 0;             // 원본 파일 내용 해시 (멀티플레이 검사용)
+    // 에셋 예산 (asset/Budget.h): 종류는 경로의 폴더, 사용량은 불러올 때 센다. 넘은 항목은 budgetProblems (비면 예산 안)
+    ModelKind kind = ModelKind::Prop;
+    u32 materials = 0;
+    u32 bones = 0;       // 아직 스킨을 읽지 않는다 (스켈레탈 애니메이션 항목)
+    u32 textureSize = 0; // 아직 텍스처를 읽지 않는다 (텍스처와 머티리얼 항목)
+    std::vector<std::string> budgetProblems;
 };
+
+// 모델이 종류의 예산을 넘은 항목 ("15200 triangles (budget 15000)"). 영어 (로그·인스펙터)
+std::vector<std::string> budgetProblems(const Model& model, const ModelBudget& budget);
 
 // 모델 지원 범위를 외부 도구에 알리는 스키마 (JSON). Blender 애드온(tools/blender-addon/mealkit/schema.json)이 읽고,
 // 단위 테스트 asset_schema가 그 파일이 이것과 같은지 본다 (엔진과 애드온이 어긋나지 않게). 불러오기가 바뀌면 같이 고친다
@@ -51,6 +61,10 @@ public:
     // 옛 GPU 메시는 지우지 않는다 (렌더러에 메시 지우기가 없다, 개발 중에만 쌓인다)
     std::vector<std::string> reloadChanged();
 
+    // 종류별 예산 (mealkit.project, game::modelBudgets). 이미 불러온 모델도 다시 검사한다
+    void setBudgets(const ModelBudget (&budgets)[kModelKindCount]);
+    const ModelBudget& budget(ModelKind kind) const { return m_budgets[static_cast<u32>(kind)]; }
+
     // 화면에서 차지하는 크기로 LOD를 고른다.
     render::MeshId pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const;
 
@@ -68,7 +82,9 @@ private:
     void* m_uploadContext = nullptr;
     render::MeshId m_box = 0xFFFFFFFFu;
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
-    std::unordered_map<std::string, unsigned long long> m_fileTimes; // 불러올 때 파일 시각 (reloadChanged)
+    std::unordered_map<std::string, unsigned long long> m_fileTimes;
+    ModelBudget m_budgets[kModelKindCount] = {kDefaultBudgets[0], kDefaultBudgets[1], kDefaultBudgets[2]};
+    void checkBudget(Model& model) const; // 불러올 때 파일 시각 (reloadChanged)
 };
 
 } // namespace mealkit::asset
