@@ -42,6 +42,11 @@ public:
     const Model* get(const std::string& path);
     render::MeshId boxMesh(); // 한 변 1인 기본 상자
 
+    // 에셋 핫 리로드 (에디터 편집 모드): 요청된 적 있는 모델 파일 중 바뀐 것(없던 파일이 생긴 것 포함)을 다시 읽는다.
+    // Model 주소는 그대로 두고 내용만 바꾼다. 다시 읽은 경로 목록. 실패하면 이전 내용을 그대로 둔다.
+    // 옛 GPU 메시는 지우지 않는다 (렌더러에 메시 지우기가 없다, 개발 중에만 쌓인다)
+    std::vector<std::string> reloadChanged();
+
     // 화면에서 차지하는 크기로 LOD를 고른다.
     render::MeshId pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const;
 
@@ -52,12 +57,14 @@ public:
     static std::string assetsRoot();                     // 저장소/실행 파일 근처의 assets 폴더
 
 private:
+    bool load(const std::string& path, Model& out);
     render::MeshId uploadMesh(const render::MeshData& mesh) { return m_upload(m_uploadContext, mesh); }
 
     render::MeshId (*m_upload)(void*, const render::MeshData&) = nullptr;
     void* m_uploadContext = nullptr;
     render::MeshId m_box = 0xFFFFFFFFu;
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
+    std::unordered_map<std::string, unsigned long long> m_fileTimes; // 불러올 때 파일 시각 (reloadChanged)
 };
 
 } // namespace mealkit::asset

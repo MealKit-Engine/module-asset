@@ -247,25 +247,45 @@ const Model* ModelCache::get(const std::string& path) {
     if (it != m_models.end()) return it->second->valid ? it->second.get() : nullptr;
 
     auto model = std::make_unique<Model>();
-    model->path = path;
-    const std::string file = resolve(path);
-    std::vector<MeshData> lods;
-    std::string error = "file not found under assets/";
-    if (!file.empty() && loadGltf(file, lods, *model, error)) {
-        model->lodCount = static_cast<u32>(lods.size());
-        for (u32 i = 0; i < model->lodCount; ++i) {
-            model->triangles[i] = static_cast<u32>(lods[i].indices.size() / 3);
-            if (m_upload) model->lods[i] = uploadMesh(lods[i]);
-        }
-        model->valid = true;
-        MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model->triangles[0], model->lodCount,
-                     model->lodCount > 1 ? "" : " (too simple to reduce)");
-    } else {
-        MEALKIT_WARN("Model %s: %s", path.c_str(), error.c_str());
-    }
+    load(path, *model);
     const Model* result = model->valid ? model.get() : nullptr;
     m_models.emplace(path, std::move(model));
     return result;
+}
+
+bool ModelCache::load(const std::string& path, Model& out) {
+    Model model;
+    model.path = path;
+    const std::string file = resolve(path);
+    m_fileTimes[path] = file.empty() ? 0 : fileWriteTime(file);
+    std::vector<MeshData> lods;
+    std::string error = "file not found under assets/";
+    if (file.empty() || !loadGltf(file, lods, model, error)) {
+        MEALKIT_WARN("Model %s: %s", path.c_str(), error.c_str());
+        if (!out.valid) out = std::move(model); // 처음이면 실패한 모델로 남긴다 (다시 읽기면 이전 것을 지킨다)
+        return false;
+    }
+    model.lodCount = static_cast<u32>(lods.size());
+    for (u32 i = 0; i < model.lodCount; ++i) {
+        model.triangles[i] = static_cast<u32>(lods[i].indices.size() / 3);
+        if (m_upload) model.lods[i] = uploadMesh(lods[i]);
+    }
+    model.valid = true;
+    MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model.triangles[0], model.lodCount,
+                 model.lodCount > 1 ? "" : " (too simple to reduce)");
+    out = std::move(model);
+    return true;
+}
+
+std::vector<std::string> ModelCache::reloadChanged() {
+    std::vector<std::string> changed;
+    for (auto& [path, model] : m_models) {
+        const std::string file = resolve(path);
+        const unsigned long long time = file.empty() ? 0 : fileWriteTime(file);
+        if (time == m_fileTimes[path]) continue;
+        if (load(path, *model)) changed.push_back(path);
+    }
+    return changed;
 }
 
 render::MeshId ModelCache::boxMesh() {
