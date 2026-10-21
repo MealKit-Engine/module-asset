@@ -55,23 +55,33 @@ u32 encodeColor(const f32 linear[4]) {
     return channel(linear[0]) | (channel(linear[1]) << 8) | (channel(linear[2]) << 16) | (channel(linear[3]) << 24);
 }
 
-void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData& out, bool& hadNormals) {
+// 모델 안의 머티리얼 목록 (정점의 material은 불러오는 동안 이 목록의 번호, 렌더러에 올린 뒤 렌더러 번호로 바꾼다)
+struct Materials {
+    std::vector<const cgltf_material*> list; // nullptr = 머티리얼 없는 프리미티브 (기본)
+    u16 index(const cgltf_material* m) {
+        for (size_t i = 0; i < list.size(); ++i)
+            if (list[i] == m) return static_cast<u16>(i);
+        list.push_back(m);
+        return static_cast<u16>(list.size() - 1);
+    }
+};
+
+void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData& out, bool& hadNormals, Materials& materials) {
     if (prim.type != cgltf_primitive_type_triangles) return;
     const cgltf_accessor* positions = nullptr;
     const cgltf_accessor* normals = nullptr;
     const cgltf_accessor* colors = nullptr;
+    const cgltf_accessor* texcoords = nullptr;
     for (cgltf_size i = 0; i < prim.attributes_count; ++i) {
         const cgltf_attribute& a = prim.attributes[i];
         if (a.type == cgltf_attribute_type_position) positions = a.data;
         else if (a.type == cgltf_attribute_type_normal) normals = a.data;
         else if (a.type == cgltf_attribute_type_color && a.index == 0) colors = a.data;
+        else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) texcoords = a.data;
     }
     if (!positions) return;
     hadNormals = hadNormals && normals != nullptr;
-
-    f32 base[4] = {1, 1, 1, 1};
-    if (prim.material && prim.material->has_pbr_metallic_roughness)
-        std::memcpy(base, prim.material->pbr_metallic_roughness.base_color_factor, sizeof(base));
+    const u16 material = materials.index(prim.material); // 기본 색은 머티리얼 표에 (정점 색은 COLOR_0만)
 
     // 열 우선(column-major) 행렬. 행렬식이 음수면 거울 변환이라 감는 순서를 한 번 더 뒤집는다.
     const f32* m = world;
@@ -80,17 +90,17 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
 
     const u32 base0 = static_cast<u32>(out.vertices.size());
     for (cgltf_size i = 0; i < positions->count; ++i) {
-        f32 p[3] = {}, n[3] = {0, 1, 0}, c[4] = {1, 1, 1, 1};
+        f32 p[3] = {}, n[3] = {0, 1, 0}, c[4] = {1, 1, 1, 1}, t[2] = {};
         cgltf_accessor_read_float(positions, i, p, 3);
         if (normals) cgltf_accessor_read_float(normals, i, n, 3);
         if (colors) cgltf_accessor_read_float(colors, i, c, cgltf_num_components(colors->type));
+        if (texcoords) cgltf_accessor_read_float(texcoords, i, t, 2);
         const Vec3 wp{m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
                       m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]};
         const Vec3 wn = normalize(Vec3{m[0] * n[0] + m[4] * n[1] + m[8] * n[2], m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
                                        m[2] * n[0] + m[6] * n[1] + m[10] * n[2]});
-        const f32 color[4] = {base[0] * c[0], base[1] * c[1], base[2] * c[2], base[3] * c[3]};
-        // glTF는 오른손 좌표계: z를 뒤집어 MealKit(왼손)로 바꾼다
-        out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(color)});
+        // glTF는 오른손 좌표계: z를 뒤집어 MealKit(왼손)로 바꾼다. 텍스처 좌표는 glTF 그대로 (v 아래로, DX12와 같다)
+        out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(c), render::packHalf2(t[0], t[1]), material});
     }
     const cgltf_size indexCount = prim.indices ? prim.indices->count : positions->count;
     const bool flip = det >= 0.0f; // z 반전으로 한 번 뒤집히고, 거울 변환이면 다시 뒤집힌다
@@ -104,14 +114,54 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
     }
 }
 
-void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals) {
+void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals, Materials& materials) {
     if (node->mesh) {
         f32 world[16];
         cgltf_node_transform_world(node, world);
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i)
-            appendPrimitive(node->mesh->primitives[i], world, out, hadNormals);
+            appendPrimitive(node->mesh->primitives[i], world, out, hadNormals, materials);
     }
-    for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals);
+    for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals, materials);
+}
+
+// 지원 범위 밖 머티리얼 기능 (불러올 때 경고하고 무시한다, docs/CODING_MODEL.md "모델·머티리얼·텍스처")
+void warnUnsupported(const std::string& path, const cgltf_material& m) {
+    const char* name = m.name ? m.name : "?";
+    const auto warn = [&](const char* what) { MEALKIT_WARN("Model %s, material '%s': %s is not supported (ignored)", path.c_str(), name, what); };
+    if (m.has_pbr_specular_glossiness) warn("specular-glossiness");
+    if (m.has_clearcoat) warn("clearcoat");
+    if (m.has_transmission || m.has_diffuse_transmission || m.has_volume) warn("transmission");
+    if (m.has_sheen) warn("sheen");
+    if (m.has_iridescence) warn("iridescence");
+    if (m.has_anisotropy) warn("anisotropy");
+    if (m.has_specular || m.has_ior) warn("specular / IOR");
+    if (m.unlit) warn("KHR_materials_unlit");
+    if (m.alpha_mode == cgltf_alpha_mode_blend) warn("alpha blend (drawn opaque; use alpha clip)");
+    if (m.double_sided) warn("double sided (back faces are culled)");
+    if (m.occlusion_texture.texture) warn("occlusion texture");
+    const cgltf_texture_view* views[] = {&m.pbr_metallic_roughness.base_color_texture,
+                                         &m.pbr_metallic_roughness.metallic_roughness_texture, &m.normal_texture, &m.emissive_texture};
+    for (const cgltf_texture_view* v : views)
+        if (v->texture && (v->texcoord != 0 || v->has_transform)) warn("a second UV set or texture transform");
+}
+
+// glTF 이미지의 인코딩된 바이트 (glb 안의 buffer view, 또는 .gltf 옆 파일)
+bool imageBytes(const cgltf_image& image, const std::string& gltfPath, std::string& out, const u8** data, size_t* size) {
+    if (image.buffer_view && image.buffer_view->buffer->data) {
+        *data = static_cast<const u8*>(image.buffer_view->buffer->data) + image.buffer_view->offset;
+        *size = image.buffer_view->size;
+        return true;
+    }
+    if (image.uri && std::strncmp(image.uri, "data:", 5) != 0) {
+        char decoded[1024];
+        std::snprintf(decoded, sizeof(decoded), "%s", image.uri);
+        cgltf_decode_uri(decoded);
+        if (!readTextFile(parentDirectory(gltfPath) + "/" + decoded, out)) return false;
+        *data = reinterpret_cast<const u8*>(out.data());
+        *size = out.size();
+        return true;
+    }
+    return false; // data URI는 읽지 않는다 (Blender는 glb에 넣는다)
 }
 
 void computeNormals(MeshData& mesh) {
@@ -166,7 +216,14 @@ bool makeLod(const MeshData& source, f32 ratio, f32 maxError, MeshData& out) {
     return true;
 }
 
-bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model, std::string& error) {
+// 렌더러에 머티리얼·텍스처를 올리는 함수 (ModelCache::setRenderer, 헤드리스는 없음)
+struct Uploads {
+    u32 (*material)(void*, const render::MaterialData&) = nullptr;
+    u32 (*texture)(void*, const void*, size_t, TextureUsage, u32*, std::string&) = nullptr;
+    void* context = nullptr;
+};
+
+bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model, std::string& error, const Uploads& up) {
     MEALKIT_ZONE("Load glTF");
     cgltf_options options{};
     options.file.read = readFile;
@@ -188,24 +245,66 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     fileHash.bytes(data->json, data->json_size);
     model.fileHash = fileHash.value;
 
-    // 예산용: 메시가 쓰는 서로 다른 재질 수 (재질 없는 프리미티브는 기본 재질 하나)
-    std::vector<const cgltf_material*> used;
-    for (cgltf_size i = 0; i < data->meshes_count; ++i)
-        for (cgltf_size p = 0; p < data->meshes[i].primitives_count; ++p) {
-            const cgltf_material* m = data->meshes[i].primitives[p].material;
-            if (std::find(used.begin(), used.end(), m) == used.end()) used.push_back(m);
-        }
-    model.materials = static_cast<u32>(used.size());
-
     MeshData mesh;
     bool hadNormals = true;
+    Materials materials;
     const cgltf_scene* sceneNode = data->scene ? data->scene : (data->scenes_count ? &data->scenes[0] : nullptr);
     if (sceneNode) {
-        for (cgltf_size i = 0; i < sceneNode->nodes_count; ++i) visitNode(sceneNode->nodes[i], mesh, hadNormals);
+        for (cgltf_size i = 0; i < sceneNode->nodes_count; ++i) visitNode(sceneNode->nodes[i], mesh, hadNormals, materials);
     } else {
         for (cgltf_size i = 0; i < data->nodes_count; ++i)
-            if (!data->nodes[i].parent) visitNode(&data->nodes[i], mesh, hadNormals);
+            if (!data->nodes[i].parent) visitNode(&data->nodes[i], mesh, hadNormals, materials);
     }
+
+    // 머티리얼 → 렌더러 머티리얼 표 (텍스처는 캐시에서). 정점의 material을 렌더러 번호로 바꾼다
+    std::vector<u16> remap(materials.list.size(), 0);
+    for (const cgltf_material* m : materials.list) if (m) warnUnsupported(path, *m);
+    model.materials = static_cast<u32>(materials.list.size());
+    if (up.material) {
+        std::vector<std::pair<const cgltf_image*, TextureUsage>> keys;
+        std::vector<u32> loaded;
+        const auto texture = [&](const cgltf_texture_view& view, TextureUsage usage) {
+            const cgltf_image* image = view.texture ? view.texture->image : nullptr;
+            if (!image || !up.texture) return render::kNoTexture;
+            for (size_t i = 0; i < keys.size(); ++i)
+                if (keys[i].first == image && keys[i].second == usage) return loaded[i];
+            std::string storage, why;
+            const u8* bytes = nullptr;
+            size_t size = 0;
+            u32 index = render::kNoTexture, longest = 0;
+            if (!imageBytes(*image, path, storage, &bytes, &size)) why = "image data not found (data URIs are not read)";
+            else index = up.texture(up.context, bytes, size, usage, &longest, why);
+            if (index == render::kNoTexture) MEALKIT_WARN("Model %s: texture %s: %s", path.c_str(), image->name ? image->name : "?", why.c_str());
+            model.textureSize = std::max(model.textureSize, longest);
+            if (index != render::kNoTexture) ++model.textures;
+            keys.emplace_back(image, usage);
+            loaded.push_back(index);
+            return index;
+        };
+        for (size_t i = 0; i < materials.list.size(); ++i) {
+            const cgltf_material* m = materials.list[i];
+            render::MaterialData md;
+            if (m) {
+                const cgltf_pbr_metallic_roughness& pbr = m->pbr_metallic_roughness;
+                if (m->has_pbr_metallic_roughness) {
+                    std::memcpy(md.baseColor, pbr.base_color_factor, sizeof(md.baseColor));
+                    md.metallic = pbr.metallic_factor;
+                    md.roughness = pbr.roughness_factor;
+                    md.baseColorTexture = texture(pbr.base_color_texture, TextureUsage::Color);
+                    md.metallicRoughnessTexture = texture(pbr.metallic_roughness_texture, TextureUsage::Linear);
+                }
+                std::memcpy(md.emissive, m->emissive_factor, sizeof(md.emissive));
+                if (m->has_emissive_strength)
+                    for (f32& e : md.emissive) e *= m->emissive_strength.emissive_strength;
+                md.emissiveTexture = texture(m->emissive_texture, TextureUsage::Color);
+                md.normalTexture = texture(m->normal_texture, TextureUsage::Normal);
+                md.normalScale = m->normal_texture.scale;
+                if (m->alpha_mode == cgltf_alpha_mode_mask) md.alphaCutoff = std::max(m->alpha_cutoff, 1e-3f);
+            }
+            remap[i] = static_cast<u16>(up.material(up.context, md));
+        }
+    }
+    for (Vertex& v : mesh.vertices) v.material = remap.empty() ? 0 : remap[v.material];
     cgltf_free(data);
     if (mesh.indices.empty()) {
         error = "no triangle meshes";
@@ -267,17 +366,19 @@ std::string budgetsJson() {
 } // namespace
 
 std::string modelSchemaJson() {
-    // 불러오기(loadGltf)가 읽는 것과 같게: 삼각형, POSITION·NORMAL·COLOR_0, 재질의 baseColorFactor. 노드 변환을 구워 메시 하나로 합친다
+    // 불러오기(loadGltf)가 읽는 것과 같게: 삼각형, POSITION·NORMAL·COLOR_0·TEXCOORD_0, glTF PBR(기본 색·법선·금속/거칠기·발광
+    // 텍스처와 계수, 알파 마스크). 노드 변환을 구워 메시 하나로 합친다
     std::string s = R"({
   "schemaVersion": 1,
   "blender": "5.2",
   "model": {
     "format": "glb",
     "folder": "models",
-    "attributes": ["POSITION", "NORMAL", "COLOR_0"],
+    "attributes": ["POSITION", "NORMAL", "COLOR_0", "TEXCOORD_0"],
     "mergesMeshes": true,
     "maxLods": )" + std::to_string(kMaxLods) + R"(,
-    "material": {"baseColorFactor": true, "vertexColor": true, "textures": false},
+    "material": {"baseColorFactor": true, "vertexColor": true, "textures": true,
+                 "textureInputs": ["Base Color", "Normal", "Metallic", "Roughness", "Emission Color"], "alphaClip": true},
     "skinning": false,
     "animation": false
   },
@@ -311,7 +412,7 @@ bool ModelCache::load(const std::string& path, Model& out) {
     m_fileTimes[path] = file.empty() ? 0 : fileWriteTime(file);
     std::vector<MeshData> lods;
     std::string error = "file not found under assets/";
-    if (file.empty() || !loadGltf(file, lods, model, error)) {
+    if (file.empty() || !loadGltf(file, lods, model, error, {m_uploadMaterial, m_uploadTexture, m_uploadContext})) {
         MEALKIT_WARN("Model %s: %s", path.c_str(), error.c_str());
         if (!out.valid) out = std::move(model); // 처음이면 실패한 모델로 남긴다 (다시 읽기면 이전 것을 지킨다)
         return false;

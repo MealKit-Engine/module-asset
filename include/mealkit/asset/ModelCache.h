@@ -1,10 +1,12 @@
 #pragma once
 
 #include "mealkit/asset/Budget.h"
+#include "mealkit/asset/TextureCache.h"
 #include "mealkit/core/Math.h"
 #include "mealkit/render/Renderer.h"
 #include "mealkit/scene/Scene.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -30,7 +32,8 @@ struct Model {
     ModelKind kind = ModelKind::Prop;
     u32 materials = 0;
     u32 bones = 0;       // 아직 스킨을 읽지 않는다 (스켈레탈 애니메이션 항목)
-    u32 textureSize = 0; // 아직 텍스처를 읽지 않는다 (텍스처와 머티리얼 항목)
+    u32 textureSize = 0; // 가장 큰 텍스처의 긴 변 (렌더러가 있을 때)
+    u32 textures = 0;
     std::vector<std::string> budgetProblems;
 };
 
@@ -49,6 +52,17 @@ public:
         m_uploadContext = renderer;
         m_upload = renderer ? [](void* r, const render::MeshData& mesh) {
             return static_cast<render::Renderer*>(r)->createMesh(mesh);
+        } : nullptr;
+        m_uploadMaterial = renderer ? [](void* r, const render::MaterialData& m) {
+            return static_cast<render::Renderer*>(r)->createMaterial(m);
+        } : nullptr;
+        // 텍스처: 캐시에서 읽거나 압축해 올린다 (asset/TextureCache.cpp, 화면 쪽). 실패하면 kNoTexture와 이유
+        m_uploadTexture = renderer ? [](void* r, const void* encoded, size_t bytes, TextureUsage usage, u32* size,
+                                        std::string& error) {
+            CompressedTexture t;
+            if (!loadCompressedTexture(encoded, bytes, usage, t, error)) return render::kNoTexture;
+            *size = std::max(t.width, t.height);
+            return static_cast<render::Renderer*>(r)->createTexture({t.width, t.height, t.mipLevels, t.format, t.data.data()});
         } : nullptr;
     }
 
@@ -79,6 +93,8 @@ private:
     render::MeshId uploadMesh(const render::MeshData& mesh) { return m_upload(m_uploadContext, mesh); }
 
     render::MeshId (*m_upload)(void*, const render::MeshData&) = nullptr;
+    u32 (*m_uploadMaterial)(void*, const render::MaterialData&) = nullptr;
+    u32 (*m_uploadTexture)(void*, const void*, size_t, TextureUsage, u32*, std::string&) = nullptr;
     void* m_uploadContext = nullptr;
     render::MeshId m_box = 0xFFFFFFFFu;
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
