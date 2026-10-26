@@ -1,0 +1,356 @@
+#include "mealkit/asset/Environment.h"
+
+#include "mealkit/core/Hash.h"
+#include "mealkit/core/Log.h"
+#include "mealkit/core/Profile.h"
+#include "mealkit/platform/Paths.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
+#if MEALKIT_DEBUG_UI
+#include "stb_image.h"
+#endif
+
+namespace mealkit::asset {
+namespace {
+
+// 캐시 파일: "MKEV", 형식 버전, 하늘 면 크기, 반사 면 크기, 반사 밉 수, 0, SH 27 floats, 하늘 텍셀, 반사 텍셀 (RGB9E5)
+constexpr u32 kMagic = 0x56454B4D; // "MKEV"
+constexpr u32 kVersion = 1;        // 굽는 방법을 바꾸면 올린다 (키에 들어가 옛 파일을 쓰지 않는다)
+constexpr u32 kMaxSkySize = 512;
+constexpr u32 kReflectSize = 128;
+constexpr u32 kReflectMips = 6;   // 128 → 4
+constexpr u32 kGgxSamples = 64;   // 밉마다 텍셀당 표본 (걸러 읽기로 잡음을 줄인다)
+constexpr f32 kRadianceClamp = 16.0f; // 반사·환경광에서 태양 같은 아주 밝은 텍셀을 자른다 (태양은 씬의 태양빛이 맡는다)
+constexpr f32 kPi = 3.14159265358979f;
+
+struct Header {
+    u32 magic, version, skySize, reflectSize, reflectMips, reserved;
+};
+
+// 정거리원통 밉 피라미드 (2×2 상자, 선형 rgb)
+struct Equirect {
+    struct Level {
+        u32 width = 0, height = 0;
+        std::vector<f32> rgb;
+    };
+    std::vector<Level> levels;
+
+    void build(const f32* rgb, u32 width, u32 height, f32 clampTo) {
+        levels.clear();
+        Level base;
+        base.width = width;
+        base.height = height;
+        base.rgb.assign(rgb, rgb + static_cast<size_t>(width) * height * 3);
+        for (f32& v : base.rgb) v = std::isfinite(v) ? std::clamp(v, 0.0f, clampTo) : 0.0f;
+        levels.push_back(std::move(base));
+        while (levels.back().width > 8 && levels.back().height > 4) {
+            const Level& s = levels.back();
+            Level d;
+            d.width = s.width / 2;
+            d.height = s.height / 2;
+            d.rgb.resize(static_cast<size_t>(d.width) * d.height * 3);
+            for (u32 y = 0; y < d.height; ++y)
+                for (u32 x = 0; x < d.width; ++x)
+                    for (u32 c = 0; c < 3; ++c) {
+                        f32 sum = 0.0f;
+                        for (u32 dy = 0; dy < 2; ++dy)
+                            for (u32 dx = 0; dx < 2; ++dx) sum += s.rgb[((y * 2 + dy) * s.width + x * 2 + dx) * 3 + c];
+                        d.rgb[(y * d.width + x) * 3 + c] = sum * 0.25f;
+                    }
+            levels.push_back(std::move(d));
+        }
+    }
+
+    // 방향 → (u, v): u는 방위각 (+z 앞이 가운데, +x 오른쪽으로 늘어남), v는 위(0)에서 아래(1)
+    static void uv(Vec3 d, f32& u, f32& v) {
+        u = 0.5f + std::atan2(d.x, d.z) / (2.0f * kPi);
+        v = std::acos(std::clamp(d.y, -1.0f, 1.0f)) / kPi;
+    }
+
+    Vec3 bilinear(const Level& l, f32 u, f32 v) const {
+        const f32 x = u * static_cast<f32>(l.width) - 0.5f, y = v * static_cast<f32>(l.height) - 0.5f;
+        const f32 fx = std::floor(x), fy = std::floor(y);
+        const f32 tx = x - fx, ty = y - fy;
+        auto at = [&](i32 px, i32 py) {
+            const i32 w = static_cast<i32>(l.width), h = static_cast<i32>(l.height);
+            px = ((px % w) + w) % w; // 가로는 이어진다
+            py = std::clamp(py, 0, h - 1);
+            const f32* p = &l.rgb[(static_cast<size_t>(py) * l.width + static_cast<size_t>(px)) * 3];
+            return Vec3{p[0], p[1], p[2]};
+        };
+        const i32 ix = static_cast<i32>(fx), iy = static_cast<i32>(fy);
+        const Vec3 a = lerp(at(ix, iy), at(ix + 1, iy), tx), b = lerp(at(ix, iy + 1), at(ix + 1, iy + 1), tx);
+        return lerp(a, b, ty);
+    }
+
+    Vec3 sample(Vec3 d, f32 lod) const {
+        f32 u, v;
+        uv(d, u, v);
+        lod = std::clamp(lod, 0.0f, static_cast<f32>(levels.size() - 1));
+        const u32 l0 = static_cast<u32>(lod), l1 = std::min<u32>(l0 + 1, static_cast<u32>(levels.size() - 1));
+        return lerp(bilinear(levels[l0], u, v), bilinear(levels[l1], u, v), lod - static_cast<f32>(l0));
+    }
+
+    // 피라미드 0단계 텍셀 하나의 평균 입체각
+    f32 texelSolidAngle() const { return 4.0f * kPi / (static_cast<f32>(levels[0].width) * static_cast<f32>(levels[0].height)); }
+};
+
+f32 lodFor(const Equirect& e, f32 solidAngle) { return std::max(0.0f, 0.5f * std::log2(solidAngle / e.texelSolidAngle())); }
+
+// 실수 구면 조화 0~2차 (y 위 기준으로 축 이름만 바꾼 표준 상수). 셰이더 Forward.hlsl evalSh와 같다
+void shBasis(Vec3 n, f32 (&y)[9]) {
+    y[0] = 0.282095f;
+    y[1] = 0.488603f * n.y;
+    y[2] = 0.488603f * n.z;
+    y[3] = 0.488603f * n.x;
+    y[4] = 1.092548f * n.x * n.y;
+    y[5] = 1.092548f * n.y * n.z;
+    y[6] = 0.315392f * (3.0f * n.z * n.z - 1.0f);
+    y[7] = 1.092548f * n.x * n.z;
+    y[8] = 0.546274f * (n.x * n.x - n.y * n.y);
+}
+
+Vec3 hammersleyGgx(u32 i, u32 count, f32 a, Vec3 n) {
+    u32 bits = i;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    const f32 x1 = static_cast<f32>(i) / static_cast<f32>(count), x2 = static_cast<f32>(bits) * 2.3283064365386963e-10f;
+    const f32 phi = 2.0f * kPi * x1;
+    const f32 cosTheta = std::sqrt((1.0f - x2) / (1.0f + (a * a - 1.0f) * x2));
+    const f32 sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+    const Vec3 up = std::abs(n.y) < 0.999f ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
+    const Vec3 tx = normalize(cross(up, n)), ty = cross(n, tx);
+    return normalize(tx * (sinTheta * std::cos(phi)) + ty * (sinTheta * std::sin(phi)) + n * cosTheta);
+}
+
+std::string cacheName(const std::string& file) {
+    Hasher h;
+    h.bytes(file.data(), file.size());
+    h.add(static_cast<u64>(kVersion));
+    char name[40];
+    std::snprintf(name, sizeof(name), "%016llx.mkenv", static_cast<unsigned long long>(h.value));
+    return name;
+}
+
+bool readCache(const std::string& path, EnvironmentMap& out) {
+    std::string file;
+    if (!readTextFile(path, file) || file.size() < sizeof(Header) + sizeof(out.sh)) return false;
+    Header hd;
+    std::memcpy(&hd, file.data(), sizeof(hd));
+    if (hd.magic != kMagic || hd.version != kVersion || hd.skySize == 0 || hd.skySize > 4096 || hd.reflectSize == 0 ||
+        hd.reflectMips == 0 || hd.reflectMips > 16)
+        return false;
+    size_t reflectTexels = 0;
+    for (u32 mip = 0; mip < hd.reflectMips; ++mip) reflectTexels += static_cast<size_t>(std::max(1u, hd.reflectSize >> mip)) * std::max(1u, hd.reflectSize >> mip);
+    const size_t skyTexels = static_cast<size_t>(hd.skySize) * hd.skySize * 6;
+    reflectTexels *= 6;
+    if (file.size() != sizeof(Header) + sizeof(out.sh) + (skyTexels + reflectTexels) * 4) return false;
+    const char* p = file.data() + sizeof(Header);
+    std::memcpy(out.sh, p, sizeof(out.sh));
+    p += sizeof(out.sh);
+    out.skySize = hd.skySize;
+    out.sky.resize(skyTexels);
+    std::memcpy(out.sky.data(), p, skyTexels * 4);
+    p += skyTexels * 4;
+    out.reflectSize = hd.reflectSize;
+    out.reflectMips = hd.reflectMips;
+    out.reflect.resize(reflectTexels);
+    std::memcpy(out.reflect.data(), p, reflectTexels * 4);
+    return true;
+}
+
+} // namespace
+
+u32 packRgb9e5(f32 r, f32 g, f32 b) {
+    constexpr f32 kMax = 65408.0f; // (511 / 512) × 2^16
+    auto fix = [](f32 v) { return std::isfinite(v) ? std::clamp(v, 0.0f, kMax) : 0.0f; };
+    r = fix(r), g = fix(g), b = fix(b);
+    const f32 maxc = std::max({r, g, b});
+    if (maxc <= 0.0f) return 0;
+    i32 exp = std::max(-16, static_cast<i32>(std::floor(std::log2(maxc)))) + 1 + 15;
+    f32 denom = std::exp2(static_cast<f32>(exp - 15 - 9));
+    if (static_cast<i32>(std::floor(maxc / denom + 0.5f)) == 512) {
+        denom *= 2.0f;
+        ++exp;
+    }
+    const u32 rm = static_cast<u32>(std::floor(r / denom + 0.5f)), gm = static_cast<u32>(std::floor(g / denom + 0.5f)),
+              bm = static_cast<u32>(std::floor(b / denom + 0.5f));
+    return std::min(rm, 511u) | (std::min(gm, 511u) << 9) | (std::min(bm, 511u) << 18) | (static_cast<u32>(exp) << 27);
+}
+
+void unpackRgb9e5(u32 v, f32 out[3]) {
+    const f32 scale = std::exp2(static_cast<f32>(static_cast<i32>(v >> 27) - 15 - 9));
+    out[0] = static_cast<f32>(v & 511u) * scale;
+    out[1] = static_cast<f32>((v >> 9) & 511u) * scale;
+    out[2] = static_cast<f32>((v >> 18) & 511u) * scale;
+}
+
+Vec3 cubeDirection(u32 face, f32 s, f32 t) {
+    Vec3 d;
+    switch (face) {
+    case 0: d = {1.0f, -t, -s}; break;   // +X
+    case 1: d = {-1.0f, -t, s}; break;   // -X
+    case 2: d = {s, 1.0f, t}; break;     // +Y
+    case 3: d = {s, -1.0f, -t}; break;   // -Y
+    case 4: d = {s, -t, 1.0f}; break;    // +Z
+    default: d = {-s, -t, -1.0f}; break; // -Z
+    }
+    return normalize(d);
+}
+
+Vec3 evalSh(const f32 (&sh)[9][3], Vec3 n) {
+    f32 y[9];
+    shBasis(n, y);
+    Vec3 c{};
+    for (u32 i = 0; i < 9; ++i) c = c + Vec3{sh[i][0], sh[i][1], sh[i][2]} * y[i];
+    return Vec3{std::max(c.x, 0.0f), std::max(c.y, 0.0f), std::max(c.z, 0.0f)};
+}
+
+void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out) {
+    MEALKIT_ZONE("Environment bake");
+    Equirect full, clamped;
+    full.build(rgb, width, height, 65408.0f);
+    clamped.build(rgb, width, height, kRadianceClamp);
+
+    // 하늘 큐브: 면 크기 = 가로/4 (최대 512), 텍셀 입체각에 맞는 단계에서 읽는다
+    out.skySize = std::clamp<u32>(width / 4, 16, kMaxSkySize);
+    const auto faceTexel = [](u32 size, u32 x, u32 y, f32& s, f32& t) {
+        s = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(size) * 2.0f - 1.0f;
+        t = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(size) * 2.0f - 1.0f;
+    };
+    const auto cubeTexelAngle = [](u32 size) { return 4.0f * kPi / (6.0f * static_cast<f32>(size) * static_cast<f32>(size)); };
+    out.sky.resize(static_cast<size_t>(out.skySize) * out.skySize * 6);
+    const f32 skyLod = lodFor(full, cubeTexelAngle(out.skySize));
+    for (u32 face = 0; face < 6; ++face)
+        for (u32 y = 0; y < out.skySize; ++y)
+            for (u32 x = 0; x < out.skySize; ++x) {
+                f32 s, t;
+                faceTexel(out.skySize, x, y, s, t);
+                const Vec3 c = full.sample(cubeDirection(face, s, t), skyLod);
+                out.sky[(static_cast<size_t>(face) * out.skySize + y) * out.skySize + x] = packRgb9e5(c.x, c.y, c.z);
+            }
+
+    // 반사 큐브: 밉 k = 거칠기 k/(밉 수-1). 0은 거울 (텍셀 크기만큼 걸러 읽기), 나머지는 GGX 중요도 표본 (N = V = R 가정)
+    out.reflectSize = kReflectSize;
+    out.reflectMips = kReflectMips;
+    out.reflect.clear();
+    for (u32 face = 0; face < 6; ++face)
+        for (u32 mip = 0; mip < kReflectMips; ++mip) {
+            const u32 size = std::max(1u, kReflectSize >> mip);
+            const f32 roughness = static_cast<f32>(mip) / static_cast<f32>(kReflectMips - 1);
+            const f32 a = std::max(roughness * roughness, 1e-4f);
+            for (u32 y = 0; y < size; ++y)
+                for (u32 x = 0; x < size; ++x) {
+                    f32 s, t;
+                    faceTexel(size, x, y, s, t);
+                    const Vec3 n = cubeDirection(face, s, t);
+                    Vec3 c{};
+                    if (mip == 0) {
+                        c = clamped.sample(n, lodFor(clamped, cubeTexelAngle(size)));
+                    } else {
+                        f32 weight = 0.0f;
+                        for (u32 i = 0; i < kGgxSamples; ++i) {
+                            const Vec3 h = hammersleyGgx(i, kGgxSamples, a, n);
+                            const f32 ndh = std::max(dot(n, h), 0.0f);
+                            const Vec3 l = h * (2.0f * ndh) - n;
+                            const f32 ndl = dot(n, l);
+                            if (ndl <= 0.0f) continue;
+                            const f32 dd = ndh * ndh * (a * a - 1.0f) + 1.0f;
+                            const f32 d = a * a / (kPi * dd * dd);
+                            const f32 pdf = std::max(d * 0.25f, 1e-6f); // D·NdotH / (4·VdotH), N = V
+                            const f32 lod = lodFor(clamped, 1.0f / (static_cast<f32>(kGgxSamples) * pdf)) + 1.0f;
+                            c = c + clamped.sample(l, lod) * ndl;
+                            weight += ndl;
+                        }
+                        if (weight > 0.0f) c = c * (1.0f / weight);
+                    }
+                    out.reflect.push_back(packRgb9e5(c.x, c.y, c.z));
+                }
+        }
+
+    // 환경광 SH: 작은 단계(가로 ≤ 128)의 텍셀마다 입체각으로 적분하고, Lambert 합성곱(A_l / π)까지 곱한다
+    const Equirect::Level& l = clamped.levels[std::min<size_t>(clamped.levels.size() - 1, static_cast<size_t>(std::max(0.0f, std::log2(static_cast<f32>(width) / 128.0f))))];
+    std::memset(out.sh, 0, sizeof(out.sh));
+    for (u32 y = 0; y < l.height; ++y) {
+        const f32 theta = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(l.height) * kPi;
+        const f32 solid = (2.0f * kPi / static_cast<f32>(l.width)) * (kPi / static_cast<f32>(l.height)) * std::sin(theta);
+        for (u32 x = 0; x < l.width; ++x) {
+            const f32 phi = ((static_cast<f32>(x) + 0.5f) / static_cast<f32>(l.width) - 0.5f) * 2.0f * kPi;
+            const Vec3 d{std::sin(theta) * std::sin(phi), std::cos(theta), std::sin(theta) * std::cos(phi)}; // uv()의 반대
+            f32 basis[9];
+            shBasis(d, basis);
+            const f32* p = &l.rgb[(static_cast<size_t>(y) * l.width + x) * 3];
+            for (u32 i = 0; i < 9; ++i)
+                for (u32 c = 0; c < 3; ++c) out.sh[i][c] += p[c] * basis[i] * solid;
+        }
+    }
+    const f32 band[9] = {1.0f, 2.0f / 3.0f, 2.0f / 3.0f, 2.0f / 3.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f};
+    for (u32 i = 0; i < 9; ++i)
+        for (u32 c = 0; c < 3; ++c) out.sh[i][c] *= band[i];
+}
+
+std::vector<std::string> listHdris(const std::string& assetsRoot) {
+    std::vector<std::string> out;
+    std::vector<std::string> folders{"textures"}; // 종류 폴더 textures/ 아래 어디든 (하위 폴더는 자유)
+    while (!folders.empty()) {
+        const std::string folder = folders.back();
+        folders.pop_back();
+        for (const std::string& f : listFiles(assetsRoot + "/" + folder, ".hdr")) out.push_back(folder + "/" + f);
+        for (const std::string& d : listDirectories(assetsRoot + "/" + folder)) folders.push_back(folder + "/" + d);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string environmentCacheFolder() { return projectRoot() + "/build/cache/environments"; }
+
+bool loadEnvironment(const std::string& hdrPath, EnvironmentMap& out, std::string& error) {
+    MEALKIT_ZONE("Environment cache");
+    std::string file;
+    if (!readTextFile(hdrPath, file)) {
+        error = "file not found";
+        return false;
+    }
+    const std::string name = cacheName(file);
+    const std::string written = environmentCacheFolder() + "/" + name;
+    if (readCache(written, out) || readCache(executableDirectory() + "/cache/environments/" + name, out)) return true;
+
+#if MEALKIT_DEBUG_UI
+    int w = 0, h = 0, channels = 0;
+    f32* rgb = stbi_loadf_from_memory(reinterpret_cast<const stbi_uc*>(file.data()), static_cast<int>(file.size()), &w, &h, &channels, 3);
+    if (!rgb) {
+        error = std::string("cannot decode HDR image: ") + stbi_failure_reason();
+        return false;
+    }
+    bakeEnvironment(rgb, static_cast<u32>(w), static_cast<u32>(h), out);
+    stbi_image_free(rgb);
+
+    std::string data(sizeof(Header) + sizeof(out.sh) + (out.sky.size() + out.reflect.size()) * 4, '\0');
+    const Header hd{kMagic, kVersion, out.skySize, out.reflectSize, out.reflectMips, 0};
+    char* p = data.data();
+    std::memcpy(p, &hd, sizeof(hd));
+    p += sizeof(hd);
+    std::memcpy(p, out.sh, sizeof(out.sh));
+    p += sizeof(out.sh);
+    std::memcpy(p, out.sky.data(), out.sky.size() * 4);
+    p += out.sky.size() * 4;
+    std::memcpy(p, out.reflect.data(), out.reflect.size() * 4);
+    if (!createDirectories(environmentCacheFolder()) || !writeTextFile(written, data))
+        MEALKIT_WARN("Environment cache: cannot write %s", written.c_str());
+    MEALKIT_INFO("Environment cache: baked %dx%d HDRI (sky %u, reflection %u, %u mips) -> %s", w, h, out.skySize,
+                 out.reflectSize, out.reflectMips, name.c_str());
+    return true;
+#else
+    error = "environment " + name + " is not in the environment cache (export the game again)";
+    return false;
+#endif
+}
+
+} // namespace mealkit::asset

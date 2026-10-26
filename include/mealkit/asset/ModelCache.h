@@ -1,12 +1,14 @@
 #pragma once
 
 #include "mealkit/asset/Budget.h"
+#include "mealkit/asset/Environment.h"
 #include "mealkit/asset/TextureCache.h"
 #include "mealkit/core/Math.h"
 #include "mealkit/render/Renderer.h"
 #include "mealkit/scene/Scene.h"
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -69,11 +71,28 @@ public:
             *size = std::max(t.width, t.height);
             return static_cast<render::Renderer*>(r)->createTexture({t.width, t.height, t.mipLevels, t.format, t.data.data()});
         } : nullptr;
+        // 하늘 HDRI: 캐시에서 읽거나 굽고 올린다 (asset/Environment.cpp, 화면 쪽). 실패하면 0과 이유
+        m_uploadEnvironment = renderer ? [](void* r, const std::string& file, std::string& error) -> u32 {
+            EnvironmentMap e;
+            if (!loadEnvironment(file, e, error)) return 0;
+            render::EnvironmentData d;
+            std::memcpy(d.sh, e.sh, sizeof(d.sh));
+            d.skySize = e.skySize;
+            d.sky = e.sky.data();
+            d.reflectSize = e.reflectSize;
+            d.reflectMips = e.reflectMips;
+            d.reflect = e.reflect.data();
+            return static_cast<render::Renderer*>(r)->createEnvironment(d);
+        } : nullptr;
     }
 
     // 처음 요청 때 불러오고 이후에는 캐시에서 준다. 실패하면 nullptr (같은 경로는 다시 시도하지 않음).
     const Model* get(const std::string& path);
     render::MeshId boxMesh(); // 한 변 1인 기본 상자
+    // 하늘 HDRI (씬 환경의 hdri, assets 기준 경로) → 렌더러 환경 번호 (FrameParams::environment). 처음 요청 때 캐시에서 읽거나
+    // 굽고(개발 빌드) 이후에는 번호만 준다. 비었거나 렌더러가 없거나 실패하면 0 (그라디언트, 같은 경로는 한 번만 경고).
+    // reloadChanged가 파일이 바뀐 것을 보면 다음 요청 때 다시 굽는다 (옛 GPU 텍스처는 남는다)
+    u32 environment(const std::string& hdriPath);
 
     // 에셋 핫 리로드 (에디터 편집 모드): 요청된 적 있는 모델 파일 중 바뀐 것(없던 파일이 생긴 것 포함)을 다시 읽는다.
     // Model 주소는 그대로 두고 내용만 바꾼다. 다시 읽은 경로 목록. 실패하면 이전 내용을 그대로 둔다.
@@ -100,7 +119,13 @@ private:
     render::MeshId (*m_upload)(void*, const render::MeshData&) = nullptr;
     u32 (*m_uploadMaterial)(void*, const render::MaterialData&) = nullptr;
     u32 (*m_uploadTexture)(void*, const void*, size_t, TextureUsage, u32*, std::string&) = nullptr;
+    u32 (*m_uploadEnvironment)(void*, const std::string&, std::string&) = nullptr;
     void* m_uploadContext = nullptr;
+    struct EnvironmentEntry {
+        u32 id = 0; // 0 = 실패 (다시 시도하지 않는다)
+        unsigned long long time = 0;
+    };
+    std::unordered_map<std::string, EnvironmentEntry> m_environments;
     render::MeshId m_box = 0xFFFFFFFFu;
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
     std::unordered_map<std::string, unsigned long long> m_fileTimes;

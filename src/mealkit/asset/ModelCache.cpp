@@ -550,6 +550,20 @@ void applyMaterialExtras(const char* json, render::MaterialData& material, std::
     }
 }
 
+u32 ModelCache::environment(const std::string& hdriPath) {
+    if (hdriPath.empty() || !m_uploadEnvironment) return 0;
+    auto it = m_environments.find(hdriPath);
+    if (it != m_environments.end()) return it->second.id;
+    EnvironmentEntry entry;
+    const std::string file = resolve(hdriPath);
+    std::string error = "file not found under assets/";
+    entry.time = file.empty() ? 0 : fileWriteTime(file);
+    if (!file.empty()) entry.id = m_uploadEnvironment(m_uploadContext, file, error);
+    if (!entry.id) MEALKIT_WARN("Sky HDRI %s: %s (using the sky colors)", hdriPath.c_str(), error.c_str());
+    m_environments.emplace(hdriPath, entry);
+    return entry.id;
+}
+
 const Model* ModelCache::get(const std::string& path) {
     if (path.empty()) return nullptr;
     auto it = m_models.find(path);
@@ -613,6 +627,12 @@ void ModelCache::setBudgets(const ModelBudget (&budgets)[kModelKindCount]) {
 }
 
 std::vector<std::string> ModelCache::reloadChanged() {
+    // 하늘 HDRI: 바뀐 파일은 지워 두면 다음 environment() 요청이 다시 굽는다
+    for (auto it = m_environments.begin(); it != m_environments.end();) {
+        const std::string file = resolve(it->first);
+        if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_environments.erase(it);
+        else ++it;
+    }
     std::vector<std::string> changed;
     for (auto& [path, model] : m_models) {
         const std::string file = resolve(path);
