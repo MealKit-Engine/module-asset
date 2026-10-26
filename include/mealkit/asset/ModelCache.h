@@ -44,6 +44,11 @@ std::vector<std::string> budgetProblems(const Model& model, const ModelBudget& b
 // 단위 테스트 asset_schema가 그 파일이 이것과 같은지 본다 (엔진과 애드온이 어긋나지 않게). 불러오기가 바뀌면 같이 고친다
 std::string modelSchemaJson();
 
+// glTF 머티리얼 extras(JSON 객체)의 "mealkit_<키>"를 스타일 프리셋 머티리얼 기능으로 (스키마 materialFeatures, Blender 애드온이
+// 커스텀 속성으로 쓴다). 큰 기능 키(outline, wind, rim, dissolve)가 있으면 그 기능을 켜고, 색 키는 그 기능의 값만 바꾼다.
+// 모르는 mealkit_ 키·틀린 값은 problems에 영어로 (불러오기가 파일 이름과 함께 경고). mealkit_로 시작하지 않는 키는 보지 않는다
+void applyMaterialExtras(const char* json, render::MaterialData& material, std::vector<std::string>& problems);
+
 class ModelCache {
 public:
     // renderer가 없으면 CPU 데이터(경계, 껍질, 해시)만 만든다 (헤드리스).

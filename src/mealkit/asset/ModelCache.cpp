@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
+#include <functional>
 #include <cstdlib>
 #include <cstring>
 
@@ -300,6 +302,10 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
                 md.normalTexture = texture(m->normal_texture, TextureUsage::Normal);
                 md.normalScale = m->normal_texture.scale;
                 if (m->alpha_mode == cgltf_alpha_mode_mask) md.alphaCutoff = std::max(m->alpha_cutoff, 1e-3f);
+                std::vector<std::string> problems; // 스타일 프리셋 머티리얼 기능 (Blender 커스텀 속성 → extras)
+                applyMaterialExtras(m->extras.data, md, problems);
+                for (const std::string& p : problems)
+                    MEALKIT_WARN("Model %s, material '%s': %s", path.c_str(), m->name ? m->name : "?", p.c_str());
             }
             remap[i] = static_cast<u16>(up.material(up.context, md));
         }
@@ -363,6 +369,135 @@ std::string budgetsJson() {
     }
     return s + "\n    ";
 }
+
+// 스타일 프리셋 머티리얼 기능의 extras 키 (Blender 커스텀 속성 "mealkit_<key>"). 큰 키(색이 아닌 것)가 기능을 켠다
+struct FeatureKey {
+    const char* key;
+    const char* label; // Blender 패널 (영어)
+    u32 feature;       // render::kMaterial*
+    bool color;        // 선형 색 세 값 (아니면 숫자 하나)
+    size_t offset;     // render::MaterialData 안의 값
+};
+const FeatureKey kFeatureKeys[] = {
+    {"outline", "Outline width (m)", render::kMaterialOutline, false, offsetof(render::MaterialData, outlineWidth)},
+    {"outlineColor", "Outline color", render::kMaterialOutline, true, offsetof(render::MaterialData, outlineColor)},
+    {"wind", "Wind sway (m, vertex alpha)", render::kMaterialWind, false, offsetof(render::MaterialData, windStrength)},
+    {"rim", "Rim light strength", render::kMaterialRim, false, offsetof(render::MaterialData, rimStrength)},
+    {"rimColor", "Rim light color", render::kMaterialRim, true, offsetof(render::MaterialData, rimColor)},
+    {"dissolve", "Dissolve edge width", render::kMaterialDissolve, false, offsetof(render::MaterialData, dissolveEdge)},
+    {"dissolveColor", "Dissolve edge glow", render::kMaterialDissolve, true, offsetof(render::MaterialData, dissolveColor)},
+};
+
+const char* featureName(u32 feature) {
+    return feature == render::kMaterialOutline ? "outline"
+           : feature == render::kMaterialWind  ? "wind"
+           : feature == render::kMaterialRim   ? "rim"
+                                               : "dissolve";
+}
+
+std::string jsonNumber(f32 v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(v));
+    return buf;
+}
+
+// 스키마 materialFeatures: 애드온 패널이 키마다 "Add" 단추를 만든다. feature는 그 키가 속한 기능(큰 키), default는 엔진 기본값
+std::string featuresJson() {
+    const render::MaterialData defaults;
+    std::string s;
+    for (const FeatureKey& k : kFeatureKeys) {
+        const f32* value = reinterpret_cast<const f32*>(reinterpret_cast<const u8*>(&defaults) + k.offset);
+        const std::string def = k.color ? "[" + jsonNumber(value[0]) + ", " + jsonNumber(value[1]) + ", " + jsonNumber(value[2]) + "]"
+                                        : jsonNumber(value[0]);
+        s += std::string(&k == kFeatureKeys ? "" : ",") + "\n    {\"key\": \"" + k.key + "\", \"label\": \"" + k.label +
+             "\", \"feature\": \"" + featureName(k.feature) + "\", \"color\": " + (k.color ? "true" : "false") +
+             ", \"default\": " + def + "}";
+    }
+    return s + "\n  ";
+}
+
+// extras JSON 객체의 최상위 키와 값. 숫자·숫자 배열만 값으로 읽고(numbers), 다른 값(문자열·객체·참거짓)은 빈 numbers로 둔다.
+// 형식이 깨지면 거기까지만 (Blender 내보내기가 쓰는 JSON이라 엄격한 검사는 하지 않는다)
+struct ExtraValue {
+    std::string key;
+    std::vector<f32> numbers;
+};
+
+std::vector<ExtraValue> parseExtras(const char* json) {
+    std::vector<ExtraValue> out;
+    const char* p = json;
+    const auto ws = [&] { while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p; };
+    const auto skipString = [&](std::string* text) { // p는 여는 따옴표
+        ++p;
+        while (*p && *p != '"') {
+            if (*p == '\\' && p[1]) ++p;
+            if (text) text->push_back(*p);
+            ++p;
+        }
+        if (*p == '"') ++p;
+    };
+    const auto number = [&](f32& v) {
+        char* end = nullptr;
+        v = std::strtof(p, &end);
+        if (end == p) return false;
+        p = end;
+        return true;
+    };
+    std::function<void()> skipValue = [&] {
+        ws();
+        if (*p == '"') return skipString(nullptr);
+        if (*p == '{' || *p == '[') {
+            const char close = *p == '{' ? '}' : ']';
+            ++p;
+            for (ws(); *p && *p != close; ws()) {
+                if (*p == ',' || *p == ':') ++p;
+                else skipValue();
+            }
+            if (*p) ++p;
+            return;
+        }
+        while (*p && *p != ',' && *p != '}' && *p != ']') ++p; // 숫자, true, false, null
+    };
+    ws();
+    if (*p != '{') return out;
+    ++p;
+    for (;;) {
+        ws();
+        if (*p != '"') break;
+        ExtraValue v;
+        skipString(&v.key);
+        ws();
+        if (*p != ':') break;
+        ++p;
+        ws();
+        f32 n = 0.0f;
+        if (*p == '[') {
+            const char* start = p++;
+            bool numeric = true;
+            for (ws(); *p && *p != ']'; ws()) {
+                if (*p == ',') { ++p; continue; }
+                if (!number(n)) { numeric = false; break; }
+                v.numbers.push_back(n);
+            }
+            if (!numeric) {
+                v.numbers.clear();
+                p = start;
+                skipValue();
+            } else if (*p) {
+                ++p;
+            }
+        } else if (!(*p == '-' || (*p >= '0' && *p <= '9')) || !number(n)) {
+            skipValue();
+        } else {
+            v.numbers.push_back(n);
+        }
+        out.push_back(std::move(v));
+        ws();
+        if (*p != ',') break;
+        ++p;
+    }
+    return out;
+}
 } // namespace
 
 std::string modelSchemaJson() {
@@ -382,15 +517,37 @@ std::string modelSchemaJson() {
     "skinning": false,
     "animation": false
   },
-  "materialFeatures": [],
+  "materialFeatures": [)" + featuresJson() + R"(],
   "budgets": {
     "kinds": [)" + budgetsJson() + R"(],
     "otherFolders": "props"
   }
 }
 )";
-    // materialFeatures: 머티리얼 extras 기능 (스타일 프리셋의 외곽선·바람·림·디졸브는 "텍스처와 머티리얼" 항목에서 더한다)
     return s;
+}
+
+void applyMaterialExtras(const char* json, render::MaterialData& material, std::vector<std::string>& problems) {
+    if (!json) return;
+    for (const ExtraValue& v : parseExtras(json)) {
+        if (v.key.rfind("mealkit_", 0) != 0) continue;
+        const std::string name = v.key.substr(8);
+        const FeatureKey* key = nullptr;
+        for (const FeatureKey& k : kFeatureKeys)
+            if (name == k.key) key = &k;
+        if (!key) {
+            problems.push_back("unknown engine feature '" + v.key + "' (ignored)");
+            continue;
+        }
+        const size_t want = key->color ? 3 : 1;
+        if (v.numbers.size() != want) {
+            problems.push_back("'" + v.key + "' needs " + (key->color ? "a color (3 numbers)" : "a number") + " (ignored)");
+            continue;
+        }
+        f32* target = reinterpret_cast<f32*>(reinterpret_cast<u8*>(&material) + key->offset);
+        for (size_t i = 0; i < want; ++i) target[i] = std::max(v.numbers[i], 0.0f);
+        if (!key->color) material.features |= key->feature; // 큰 키만 기능을 켠다 (색만 있으면 기본 꺼짐)
+    }
 }
 
 const Model* ModelCache::get(const std::string& path) {
