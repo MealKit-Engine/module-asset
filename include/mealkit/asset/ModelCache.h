@@ -1,9 +1,11 @@
 #pragma once
 
+#include "mealkit/asset/Animation.h"
 #include "mealkit/asset/Budget.h"
 #include "mealkit/asset/Environment.h"
 #include "mealkit/asset/TextureCache.h"
 #include "mealkit/core/Math.h"
+#include "mealkit/render/DrawList.h"
 #include "mealkit/render/Renderer.h"
 #include "mealkit/scene/Scene.h"
 
@@ -33,11 +35,20 @@ struct Model {
     // 에셋 예산 (asset/Budget.h): 종류는 경로의 폴더, 사용량은 불러올 때 센다. 넘은 항목은 budgetProblems (비면 예산 안)
     ModelKind kind = ModelKind::Prop;
     u32 materials = 0;
-    u32 bones = 0;       // 아직 스킨을 읽지 않는다 (스켈레탈 애니메이션 항목)
+    u32 bones = 0;       // 스킨의 관절 수 (kMaxJoints를 넘으면 스킨을 버리고 정적 모델로)
+    // 스켈레탈 애니메이션 (asset/Animation.h): 스킨이 있으면 lods[0] 하나가 스킨 메시 (LOD 없음), clips는 glTF 애니메이션
+    Skeleton skeleton;
+    std::vector<AnimationClip> clips;
+    bool skinned() const { return skeleton.valid(); }
     u32 textureSize = 0; // 가장 큰 텍스처의 긴 변 (렌더러가 있을 때)
     u32 textures = 0;
     std::vector<std::string> budgetProblems;
 };
+
+// 모델 하나를 목록에 넣는다: 정적 모델은 add, 스킨 모델은 anim("<클립> [초 어긋남]", 씬의 kAnimField)을 seconds에서
+// 반복 재생한 팔레트로 addSkinned (클립이 없거나 비면 쉬는 자세). mesh는 pickLod 결과 (스킨 모델은 lods[0])
+void addModel(render::DrawList& out, const Model& model, render::MeshId mesh, const render::InstanceData& instance,
+              const std::string& anim = {}, f64 seconds = 0.0);
 
 // 모델이 종류의 예산을 넘은 항목 ("15200 triangles (budget 15000)"). 영어 (로그·인스펙터)
 std::vector<std::string> budgetProblems(const Model& model, const ModelBudget& budget);

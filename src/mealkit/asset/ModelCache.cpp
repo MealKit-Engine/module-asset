@@ -68,18 +68,48 @@ struct Materials {
     }
 };
 
-void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData& out, bool& hadNormals, Materials& materials) {
+// 스킨 읽기 상태: 스킨 하나(첫 스킨)의 관절 번호 바꾸기 (glTF skin.joints 번호 → Skeleton 번호)
+struct SkinState {
+    const cgltf_skin* skin = nullptr;
+    std::vector<u8> remap;              // skin.joints 번호 → Skeleton 번호
+    std::vector<const cgltf_node*> nodes; // Skeleton 번호 → 노드
+    i32 jointOf(const cgltf_node* n) const { // 노드 또는 그 조상 중 가장 가까운 관절 (없으면 0: 뿌리)
+        for (; n; n = n->parent)
+            for (size_t i = 0; i < nodes.size(); ++i)
+                if (nodes[i] == n) return static_cast<i32>(i);
+        return 0;
+    }
+};
+
+u32 packWeights(const f32 w[4]) {
+    f32 sum = w[0] + w[1] + w[2] + w[3];
+    if (sum <= 0.0f) return 0xFFu;
+    u32 q[4], total = 0;
+    for (int i = 0; i < 4; ++i) total += q[i] = static_cast<u32>(std::lround(std::clamp(w[i] / sum, 0.0f, 1.0f) * 255.0f));
+    // 합을 255로 맞춘다 (가장 큰 가중치에서)
+    int big = 0;
+    for (int i = 1; i < 4; ++i) if (q[i] > q[big]) big = i;
+    q[big] = static_cast<u32>(static_cast<i32>(q[big]) + 255 - static_cast<i32>(total));
+    return q[0] | (q[1] << 8) | (q[2] << 16) | (q[3] << 24);
+}
+
+void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData& out, bool& hadNormals, Materials& materials,
+                     const SkinState* skin, i32 rigidJoint) {
     if (prim.type != cgltf_primitive_type_triangles) return;
     const cgltf_accessor* positions = nullptr;
     const cgltf_accessor* normals = nullptr;
     const cgltf_accessor* colors = nullptr;
     const cgltf_accessor* texcoords = nullptr;
+    const cgltf_accessor* jointsAttr = nullptr;
+    const cgltf_accessor* weightsAttr = nullptr;
     for (cgltf_size i = 0; i < prim.attributes_count; ++i) {
         const cgltf_attribute& a = prim.attributes[i];
         if (a.type == cgltf_attribute_type_position) positions = a.data;
         else if (a.type == cgltf_attribute_type_normal) normals = a.data;
         else if (a.type == cgltf_attribute_type_color && a.index == 0) colors = a.data;
         else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) texcoords = a.data;
+        else if (a.type == cgltf_attribute_type_joints && a.index == 0) jointsAttr = a.data;
+        else if (a.type == cgltf_attribute_type_weights && a.index == 0) weightsAttr = a.data;
     }
     if (!positions) return;
     hadNormals = hadNormals && normals != nullptr;
@@ -103,6 +133,21 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
                                        m[2] * n[0] + m[6] * n[1] + m[10] * n[2]});
         // glTF는 오른손 좌표계: z를 뒤집어 MealKit(왼손)로 바꾼다. 텍스처 좌표는 glTF 그대로 (v 아래로, DX12와 같다)
         out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(c), render::packHalf2(t[0], t[1]), material});
+        if (skin) { // 스킨 모델: 관절이 없는 프리미티브는 가장 가까운 조상 관절에 붙는다 (rigidJoint)
+            render::SkinWeights sw;
+            sw.joints = static_cast<u32>(rigidJoint);
+            if (jointsAttr && weightsAttr) {
+                cgltf_uint j[4] = {};
+                f32 w[4] = {};
+                cgltf_accessor_read_uint(jointsAttr, i, j, 4);
+                cgltf_accessor_read_float(weightsAttr, i, w, 4);
+                sw.joints = 0;
+                for (int k = 0; k < 4; ++k)
+                    sw.joints |= static_cast<u32>(j[k] < skin->remap.size() ? skin->remap[j[k]] : 0) << (8 * k);
+                sw.weights = packWeights(w);
+            }
+            out.skin.push_back(sw);
+        }
     }
     const cgltf_size indexCount = prim.indices ? prim.indices->count : positions->count;
     const bool flip = det >= 0.0f; // z 반전으로 한 번 뒤집히고, 거울 변환이면 다시 뒤집힌다
@@ -116,14 +161,140 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
     }
 }
 
-void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals, Materials& materials) {
+void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals, Materials& materials, const SkinState* skin) {
     if (node->mesh) {
         f32 world[16];
         cgltf_node_transform_world(node, world);
+        const bool ownSkin = skin && node->skin == skin->skin;
+        if (ownSkin) { // glTF: 스킨 메시의 노드 변환은 쓰지 않는다 (정점은 바인드 공간)
+            std::memset(world, 0, sizeof(world));
+            world[0] = world[5] = world[10] = world[15] = 1.0f;
+        }
+        const i32 rigid = skin ? skin->jointOf(node) : 0;
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i)
-            appendPrimitive(node->mesh->primitives[i], world, out, hadNormals, materials);
+            appendPrimitive(node->mesh->primitives[i], world, out, hadNormals, materials, skin, rigid);
     }
-    for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals, materials);
+    for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals, materials, skin);
+}
+
+// glTF 열 우선 행렬 → 행 벡터 규약 Mat4 (메모리 그대로: 열 i가 행 i)
+Mat4 fromGltf(const f32 m[16]) {
+    Mat4 r;
+    std::memcpy(&r.m[0][0], m, sizeof(f32) * 16);
+    return r;
+}
+
+// 첫 스킨 → Skeleton (부모가 앞에 오게 다시 늘어놓는다). 관절이 너무 많으면 false
+bool readSkeleton(const cgltf_skin& skin, SkinState& state, Skeleton& out, std::string& why) {
+    const size_t count = skin.joints_count;
+    if (count == 0) return false;
+    if (count > kMaxJoints) {
+        why = std::to_string(count) + " joints (max " + std::to_string(kMaxJoints) + ")";
+        return false;
+    }
+    const auto skinIndex = [&](const cgltf_node* n) -> i32 {
+        for (size_t i = 0; i < count; ++i)
+            if (skin.joints[i] == n) return static_cast<i32>(i);
+        return -1;
+    };
+    std::vector<i32> parent(count, -1), depth(count, 0); // 스킨 번호로
+    for (size_t i = 0; i < count; ++i)
+        for (const cgltf_node* n = skin.joints[i]->parent; n; n = n->parent) {
+            const i32 p = skinIndex(n);
+            if (p >= 0 && parent[i] < 0) parent[i] = p;
+            if (p >= 0) ++depth[i];
+        }
+    std::vector<size_t> order(count);
+    for (size_t i = 0; i < count; ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return depth[a] < depth[b]; });
+    state.skin = &skin;
+    state.remap.assign(count, 0);
+    state.nodes.resize(count);
+    for (size_t k = 0; k < count; ++k) {
+        state.remap[order[k]] = static_cast<u8>(k);
+        state.nodes[k] = skin.joints[order[k]];
+    }
+    out.joints.resize(count);
+    for (size_t k = 0; k < count; ++k) {
+        const size_t i = order[k];
+        const cgltf_node* n = skin.joints[i];
+        Skeleton::Joint& j = out.joints[k];
+        j.name = n->name ? n->name : "joint" + std::to_string(k);
+        j.parent = parent[i] >= 0 ? static_cast<i32>(state.remap[static_cast<size_t>(parent[i])]) : -1;
+        if (n->has_translation) j.rest.translation = {n->translation[0], n->translation[1], n->translation[2]};
+        if (n->has_rotation) j.rest.rotation = {n->rotation[0], n->rotation[1], n->rotation[2], n->rotation[3]};
+        if (n->has_scale) j.rest.scale = {n->scale[0], n->scale[1], n->scale[2]};
+        f32 ib[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        if (skin.inverse_bind_matrices) cgltf_accessor_read_float(skin.inverse_bind_matrices, i, ib, 16);
+        j.inverseBind = fromGltf(ib);
+    }
+    const cgltf_node* top = state.nodes[0]->parent; // 뿌리 관절 위 노드 (Blender 아마추어 오브젝트)
+    if (top) {
+        f32 m[16];
+        cgltf_node_transform_world(top, m);
+        out.root = fromGltf(m);
+    }
+    return true;
+}
+
+// glTF 애니메이션 → 30 Hz로 구운 클립. 관절이 아닌 노드를 움직이는 채널과 모프 가중치는 버린다.
+// 보간: 선형(회전은 nlerp), 계단, 큐빅 스플라인은 키 값 사이 선형으로 (접선은 쓰지 않는다)
+AnimationClip bakeClip(const cgltf_animation& anim, const SkinState& state, const Skeleton& skeleton, size_t index) {
+    AnimationClip clip;
+    clip.name = anim.name && *anim.name ? anim.name : "clip" + std::to_string(index);
+    f32 duration = 0.0f;
+    for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+        const cgltf_accessor* input = anim.channels[c].sampler->input;
+        if (input->count) {
+            f32 last = 0.0f;
+            cgltf_accessor_read_float(input, input->count - 1, &last, 1);
+            duration = std::max(duration, last);
+        }
+    }
+    const u32 joints = static_cast<u32>(skeleton.joints.size());
+    clip.frames = static_cast<u32>(std::ceil(duration * static_cast<f32>(kClipFrameRate) - 1e-3f)) + 1;
+    clip.duration = static_cast<f32>(clip.frames - 1) / static_cast<f32>(kClipFrameRate);
+    clip.poses.resize(static_cast<size_t>(clip.frames) * joints);
+    for (u32 f = 0; f < clip.frames; ++f)
+        for (u32 j = 0; j < joints; ++j) clip.poses[static_cast<size_t>(f) * joints + j] = skeleton.joints[j].rest;
+    for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+        const cgltf_animation_channel& ch = anim.channels[c];
+        i32 joint = -1;
+        for (size_t k = 0; k < state.nodes.size(); ++k)
+            if (state.nodes[k] == ch.target_node) joint = static_cast<i32>(k);
+        const cgltf_animation_path_type path = ch.target_path;
+        if (joint < 0 || path == cgltf_animation_path_type_weights || path == cgltf_animation_path_type_invalid) continue;
+        const cgltf_animation_sampler& s = *ch.sampler;
+        const size_t keys = s.input->count;
+        if (keys == 0) continue;
+        const int comps = path == cgltf_animation_path_type_rotation ? 4 : 3;
+        const bool cubic = s.interpolation == cgltf_interpolation_type_cubic_spline;
+        std::vector<f32> times(keys), values(keys * comps);
+        for (size_t k = 0; k < keys; ++k) {
+            cgltf_accessor_read_float(s.input, k, &times[k], 1);
+            cgltf_accessor_read_float(s.output, cubic ? k * 3 + 1 : k, &values[k * comps], comps);
+        }
+        for (u32 f = 0; f < clip.frames; ++f) {
+            const f32 t = static_cast<f32>(f) / static_cast<f32>(kClipFrameRate);
+            size_t k = 0;
+            while (k + 1 < keys && times[k + 1] <= t) ++k;
+            size_t k1 = std::min(k + 1, keys - 1);
+            f32 u = 0.0f;
+            if (k1 != k && t > times[k] && s.interpolation != cgltf_interpolation_type_step)
+                u = std::clamp((t - times[k]) / std::max(times[k1] - times[k], 1e-6f), 0.0f, 1.0f);
+            const f32* a = &values[k * comps];
+            const f32* b = &values[k1 * comps];
+            JointPose& pose = clip.poses[static_cast<size_t>(f) * joints + static_cast<size_t>(joint)];
+            if (path == cgltf_animation_path_type_rotation)
+                pose.rotation = nlerp({a[0], a[1], a[2], a[3]}, {b[0], b[1], b[2], b[3]}, u);
+            else {
+                const Vec3 v = lerp(Vec3{a[0], a[1], a[2]}, Vec3{b[0], b[1], b[2]}, u);
+                if (path == cgltf_animation_path_type_translation) pose.translation = v;
+                else pose.scale = v;
+            }
+        }
+    }
+    return clip;
 }
 
 // 지원 범위 밖 머티리얼 기능 (불러올 때 경고하고 무시한다, docs/CODING_MODEL.md "모델·머티리얼·텍스처")
@@ -180,22 +351,41 @@ void computeNormals(MeshData& mesh) {
     for (Vertex& v : mesh.vertices) v.normal = normalize(v.normal);
 }
 
-void optimize(MeshData& mesh) {
-    const size_t indexCount = mesh.indices.size();
-    std::vector<u32> remap(mesh.vertices.size());
-    const size_t unique = meshopt_generateVertexRemap(remap.data(), mesh.indices.data(), indexCount,
-                                                      mesh.vertices.data(), mesh.vertices.size(), sizeof(Vertex));
-    std::vector<Vertex> vertices(unique);
-    meshopt_remapVertexBuffer(vertices.data(), mesh.vertices.data(), mesh.vertices.size(), sizeof(Vertex),
-                              remap.data());
-    meshopt_remapIndexBuffer(mesh.indices.data(), mesh.indices.data(), indexCount, remap.data());
-    meshopt_optimizeVertexCache(mesh.indices.data(), mesh.indices.data(), indexCount, unique);
-    meshopt_optimizeOverdraw(mesh.indices.data(), mesh.indices.data(), indexCount, &vertices[0].position.x, unique,
-                             sizeof(Vertex), 1.05f);
-    const size_t used = meshopt_optimizeVertexFetch(vertices.data(), mesh.indices.data(), indexCount, vertices.data(),
-                                                    unique, sizeof(Vertex));
+// 정점 형식 V (첫 필드가 위치)를 정리한다
+template <class V>
+void optimizeVertices(std::vector<V>& in, std::vector<u32>& indices) {
+    const size_t indexCount = indices.size();
+    std::vector<u32> remap(in.size());
+    const size_t unique = meshopt_generateVertexRemap(remap.data(), indices.data(), indexCount, in.data(), in.size(), sizeof(V));
+    std::vector<V> vertices(unique);
+    meshopt_remapVertexBuffer(vertices.data(), in.data(), in.size(), sizeof(V), remap.data());
+    meshopt_remapIndexBuffer(indices.data(), indices.data(), indexCount, remap.data());
+    meshopt_optimizeVertexCache(indices.data(), indices.data(), indexCount, unique);
+    meshopt_optimizeOverdraw(indices.data(), indices.data(), indexCount, reinterpret_cast<const f32*>(vertices.data()), unique, sizeof(V), 1.05f);
+    const size_t used = meshopt_optimizeVertexFetch(vertices.data(), indices.data(), indexCount, vertices.data(), unique, sizeof(V));
     vertices.resize(used);
-    mesh.vertices = std::move(vertices);
+    in = std::move(vertices);
+}
+
+struct SkinnedVertex {
+    Vertex v;
+    render::SkinWeights s;
+};
+
+void optimize(MeshData& mesh) {
+    if (mesh.skin.empty()) {
+        optimizeVertices(mesh.vertices, mesh.indices);
+        return;
+    }
+    std::vector<SkinnedVertex> both(mesh.vertices.size());
+    for (size_t i = 0; i < both.size(); ++i) both[i] = {mesh.vertices[i], mesh.skin[i]};
+    optimizeVertices(both, mesh.indices);
+    mesh.vertices.resize(both.size());
+    mesh.skin.resize(both.size());
+    for (size_t i = 0; i < both.size(); ++i) {
+        mesh.vertices[i] = both[i].v;
+        mesh.skin[i] = both[i].s;
+    }
 }
 
 // LOD: 삼각형을 줄인 메시. 충분히 줄지 않으면 만들지 않는다.
@@ -250,12 +440,30 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     MeshData mesh;
     bool hadNormals = true;
     Materials materials;
+    // 스킨: 첫 스킨 하나만 (스킨이 여럿이면 나머지 메시는 바인드 자세 그대로 첫 스킨의 뿌리에 붙는다)
+    SkinState skinState;
+    model.skeleton = {};
+    model.clips.clear();
+    model.bones = 0;
+    if (data->skins_count) {
+        std::string why;
+        if (readSkeleton(data->skins[0], skinState, model.skeleton, why)) {
+            model.bones = static_cast<u32>(model.skeleton.joints.size());
+            for (cgltf_size a = 0; a < data->animations_count; ++a)
+                model.clips.push_back(bakeClip(data->animations[a], skinState, model.skeleton, a));
+            if (data->skins_count > 1) MEALKIT_WARN("Model %s: %zu skins, only the first is animated", path.c_str(), data->skins_count);
+        } else if (!why.empty()) {
+            MEALKIT_WARN("Model %s: skin ignored: %s (drawn in the bind pose)", path.c_str(), why.c_str());
+            model.bones = static_cast<u32>(data->skins[0].joints_count);
+        }
+    }
+    const SkinState* skin = model.skeleton.valid() ? &skinState : nullptr;
     const cgltf_scene* sceneNode = data->scene ? data->scene : (data->scenes_count ? &data->scenes[0] : nullptr);
     if (sceneNode) {
-        for (cgltf_size i = 0; i < sceneNode->nodes_count; ++i) visitNode(sceneNode->nodes[i], mesh, hadNormals, materials);
+        for (cgltf_size i = 0; i < sceneNode->nodes_count; ++i) visitNode(sceneNode->nodes[i], mesh, hadNormals, materials, skin);
     } else {
         for (cgltf_size i = 0; i < data->nodes_count; ++i)
-            if (!data->nodes[i].parent) visitNode(&data->nodes[i], mesh, hadNormals, materials);
+            if (!data->nodes[i].parent) visitNode(&data->nodes[i], mesh, hadNormals, materials, skin);
     }
 
     // 머티리얼 → 렌더러 머티리얼 표 (텍스처는 캐시에서). 정점의 material을 렌더러 번호로 바꾼다
@@ -331,9 +539,10 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     for (size_t i = 0; i < mesh.vertices.size(); i += stride) model.hullPoints.push_back(mesh.vertices[i].position);
 
     optimize(mesh);
+    const bool skinned = !mesh.skin.empty();
     lods.push_back(std::move(mesh));
     MeshData lod;
-    if (makeLod(lods[0], 0.5f, 0.02f, lod)) {
+    if (!skinned && makeLod(lods[0], 0.5f, 0.02f, lod)) { // 스킨 메시는 LOD를 만들지 않는다 (캐릭터는 몇 개뿐)
         lods.push_back(std::move(lod));
         MeshData lod2;
         if (makeLod(lods[1], 0.4f, 0.05f, lod2)) lods.push_back(std::move(lod2));
@@ -509,13 +718,14 @@ std::string modelSchemaJson() {
   "model": {
     "format": "glb",
     "folder": "models",
-    "attributes": ["POSITION", "NORMAL", "COLOR_0", "TEXCOORD_0"],
+    "attributes": ["POSITION", "NORMAL", "COLOR_0", "TEXCOORD_0", "JOINTS_0", "WEIGHTS_0"],
     "mergesMeshes": true,
     "maxLods": )" + std::to_string(kMaxLods) + R"(,
     "material": {"baseColorFactor": true, "vertexColor": true, "textures": true,
                  "textureInputs": ["Base Color", "Normal", "Metallic", "Roughness", "Emission Color"], "alphaClip": true},
-    "skinning": false,
-    "animation": false
+    "skinning": true,
+    "maxJoints": )" + std::to_string(kMaxJoints) + R"(,
+    "animation": true
   },
   "materialFeatures": [)" + featuresJson() + R"(],
   "budgets": {
@@ -619,8 +829,11 @@ bool ModelCache::load(const std::string& path, Model& out) {
     }
     model.valid = true;
     model.kind = modelKind(path);
-    MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model.triangles[0], model.lodCount,
-                 model.lodCount > 1 ? "" : " (too simple to reduce)");
+    if (model.skinned())
+        MEALKIT_INFO("Model %s: %u triangles, skinned (%u joints, %zu clips)", path.c_str(), model.triangles[0], model.bones, model.clips.size());
+    else
+        MEALKIT_INFO("Model %s: %u triangles, %u LOD(s)%s", path.c_str(), model.triangles[0], model.lodCount,
+                     model.lodCount > 1 ? "" : " (too simple to reduce)");
     checkBudget(model);
     out = std::move(model);
     return true;
@@ -685,6 +898,26 @@ render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 posi
     u32 lod = size > 0.08f ? 0 : size > 0.03f ? 1 : 2;
     lod = std::min(lod, model.lodCount - 1);
     return model.lods[lod];
+}
+
+void addModel(render::DrawList& out, const Model& model, render::MeshId mesh, const render::InstanceData& instance,
+              const std::string& anim, f64 seconds) {
+    if (!model.skinned()) {
+        out.add(mesh, instance);
+        return;
+    }
+    thread_local std::vector<JointPose> pose;
+    thread_local std::vector<BoneMatrix> palette;
+    const size_t space = anim.find(' ');
+    const AnimationClip* clip = anim.empty() ? nullptr : findClip(model.clips, anim.substr(0, space));
+    if (clip) {
+        const f64 offset = space == std::string::npos ? 0.0 : std::atof(anim.c_str() + space + 1);
+        samplePose(model.skeleton, *clip, static_cast<f32>(std::fmod(seconds + offset, 4096.0)), true, pose);
+    } else {
+        restPose(model.skeleton, pose);
+    }
+    skinPalette(model.skeleton, pose, palette);
+    out.addSkinned(model.lods[0], instance, palette.data(), static_cast<u32>(palette.size()));
 }
 
 u64 ModelCache::hashModels(const scene::Scene& scene) {
