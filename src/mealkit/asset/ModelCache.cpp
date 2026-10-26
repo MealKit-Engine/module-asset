@@ -564,6 +564,30 @@ u32 ModelCache::environment(const std::string& hdriPath) {
     return entry.id;
 }
 
+u32 ModelCache::probe(const std::string& probePath) {
+    if (probePath.empty() || !m_uploadProbe) return 0;
+    auto it = m_probes.find(probePath);
+    if (it != m_probes.end()) return it->second.id;
+    EnvironmentEntry entry;
+    const std::string file = resolve(probePath);
+    std::string error = "file not found under assets/ (bake the probe in the editor)";
+    entry.time = file.empty() ? 0 : fileWriteTime(file);
+    if (!file.empty()) entry.id = m_uploadProbe(m_uploadContext, file, error);
+    if (!entry.id) MEALKIT_WARN("Reflection probe %s: %s (using the sky reflection)", probePath.c_str(), error.c_str());
+    m_probes.emplace(probePath, entry);
+    return entry.id;
+}
+
+void ModelCache::probes(const scene::Scene& scene, std::vector<render::ReflectionProbe>& out) {
+    out.clear();
+    for (const scene::Entity& e : scene.entities) {
+        if (!e.is(scene::kTypeProbe) || out.size() >= m_probeLimit) continue;
+        const u32 id = probe(scene::probeFile(e));
+        const scene::Transform world = scene::worldTransform(scene, e);
+        if (id) out.push_back({world.position, Vec3{std::fabs(world.scale.x), std::fabs(world.scale.y), std::fabs(world.scale.z)} * 0.5f, id});
+    }
+}
+
 const Model* ModelCache::get(const std::string& path) {
     if (path.empty()) return nullptr;
     auto it = m_models.find(path);
@@ -633,6 +657,11 @@ std::vector<std::string> ModelCache::reloadChanged() {
         if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_environments.erase(it);
         else ++it;
     }
+    for (auto it = m_probes.begin(); it != m_probes.end();) { // 다시 구운 반사 프로브
+        const std::string file = resolve(it->first);
+        if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_probes.erase(it);
+        else ++it;
+    }
     std::vector<std::string> changed;
     for (auto& [path, model] : m_models) {
         const std::string file = resolve(path);
@@ -661,7 +690,7 @@ render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 posi
 u64 ModelCache::hashModels(const scene::Scene& scene) {
     Hasher h;
     for (const scene::Entity& e : scene.entities) {
-        if (e.model.empty() || e.is(scene::kTypeDecoration)) continue;
+        if (e.model.empty() || e.is(scene::kTypeDecoration) || e.is(scene::kTypeProbe)) continue;
         const Model* model = get(e.model);
         h.add(model ? model->fileHash : 0ull);
     }

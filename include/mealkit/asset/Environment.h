@@ -33,6 +33,18 @@ std::vector<std::string> listHdris(const std::string& assetsRoot);
 // 캐시 폴더: 쓰는 곳은 <프로젝트>/build/cache/environments, 읽을 때는 그다음 exe 옆 cache/environments (출시본)
 std::string environmentCacheFolder();
 
+// 반사 프로브 (docs/ROADMAP.md 2단계 "반사 프로브"): 씬의 reflection_probe 물체 자리에서 에디터가 장면을 큐브 면 여섯으로
+// 그려 읽고(editor/ProbeBaker) 여기서 반사 큐브 + GGX 밉으로 굽는다. 파일은 assets/probes/<씬>_<물체 id>.mkprobe (커밋한다:
+// 출시본은 굽지 않고 이 파일을 읽는다). 하늘 HDRI의 반사 큐브와 같은 배치 (RGB9E5, 면마다 밉 0부터)
+struct ProbeMap {
+    u32 size = 0, mips = 0;
+    std::vector<u32> reflect;
+};
+// faces: 면 여섯 (+X −X +Y −Y +Z −Z, cubeDirection 방향) × faceSize² × rgb 선형. 크기는 faceSize, 밉은 4까지
+void bakeProbe(const f32* faces, u32 faceSize, ProbeMap& out);
+bool saveProbe(const std::string& path, const ProbeMap& probe);
+bool loadProbe(const std::string& path, ProbeMap& out, std::string& error);
+
 // --- 굽기 부품 (단위 테스트)
 u32 packRgb9e5(f32 r, f32 g, f32 b); // 음수는 0, 너무 큰 값은 최대로
 void unpackRgb9e5(u32 v, f32 out[3]);

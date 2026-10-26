@@ -84,6 +84,12 @@ public:
             d.reflect = e.reflect.data();
             return static_cast<render::Renderer*>(r)->createEnvironment(d);
         } : nullptr;
+        // 반사 프로브: assets/probes/의 구운 파일을 올린다. 실패하면 0과 이유
+        m_uploadProbe = renderer ? [](void* r, const std::string& file, std::string& error) -> u32 {
+            ProbeMap probe;
+            if (!loadProbe(file, probe, error)) return 0;
+            return static_cast<render::Renderer*>(r)->createProbe(probe.size, probe.mips, probe.reflect.data());
+        } : nullptr;
     }
 
     // 처음 요청 때 불러오고 이후에는 캐시에서 준다. 실패하면 nullptr (같은 경로는 다시 시도하지 않음).
@@ -93,6 +99,12 @@ public:
     // 굽고(개발 빌드) 이후에는 번호만 준다. 비었거나 렌더러가 없거나 실패하면 0 (그라디언트, 같은 경로는 한 번만 경고).
     // reloadChanged가 파일이 바뀐 것을 보면 다음 요청 때 다시 굽는다 (옛 GPU 텍스처는 남는다)
     u32 environment(const std::string& hdriPath);
+    // 반사 프로브 파일 (assets 기준 .mkprobe) → 렌더러 프로브 번호. environment와 같이 처음 요청 때 올리고, 바뀐 파일은 다시 올린다
+    u32 probe(const std::string& probePath);
+    // 씬의 반사 프로브 물체(scene::kTypeProbe, 구운 것만) → FrameParams::probes. 위치는 월드 좌표 (계층·펼친 씬 모두).
+    // 한도(setProbeLimit, 프로젝트 설정 probeMaxCount)를 넘는 프로브는 버린다
+    void probes(const scene::Scene& scene, std::vector<render::ReflectionProbe>& out);
+    void setProbeLimit(u32 count) { m_probeLimit = std::clamp<u32>(count, 1, render::kMaxReflectionProbes); }
 
     // 에셋 핫 리로드 (에디터 편집 모드): 요청된 적 있는 모델 파일 중 바뀐 것(없던 파일이 생긴 것 포함)을 다시 읽는다.
     // Model 주소는 그대로 두고 내용만 바꾼다. 다시 읽은 경로 목록. 실패하면 이전 내용을 그대로 둔다.
@@ -120,12 +132,15 @@ private:
     u32 (*m_uploadMaterial)(void*, const render::MaterialData&) = nullptr;
     u32 (*m_uploadTexture)(void*, const void*, size_t, TextureUsage, u32*, std::string&) = nullptr;
     u32 (*m_uploadEnvironment)(void*, const std::string&, std::string&) = nullptr;
+    u32 (*m_uploadProbe)(void*, const std::string&, std::string&) = nullptr;
     void* m_uploadContext = nullptr;
     struct EnvironmentEntry {
         u32 id = 0; // 0 = 실패 (다시 시도하지 않는다)
         unsigned long long time = 0;
     };
     std::unordered_map<std::string, EnvironmentEntry> m_environments;
+    std::unordered_map<std::string, EnvironmentEntry> m_probes;
+    u32 m_probeLimit = 8;
     render::MeshId m_box = 0xFFFFFFFFu;
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
     std::unordered_map<std::string, unsigned long long> m_fileTimes;

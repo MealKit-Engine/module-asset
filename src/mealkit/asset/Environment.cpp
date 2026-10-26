@@ -130,6 +130,124 @@ Vec3 hammersleyGgx(u32 i, u32 count, f32 a, Vec3 n) {
     return normalize(tx * (sinTheta * std::cos(phi)) + ty * (sinTheta * std::sin(phi)) + n * cosTheta);
 }
 
+void faceTexel(u32 size, u32 x, u32 y, f32& s, f32& t) {
+    s = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(size) * 2.0f - 1.0f;
+    t = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(size) * 2.0f - 1.0f;
+}
+f32 cubeTexelAngle(u32 size) { return 4.0f * kPi / (6.0f * static_cast<f32>(size) * static_cast<f32>(size)); }
+
+// 반사 큐브 (면마다 밉 0부터 out에 붙인다): 밉 k = 거칠기 k/(밉 수-1). 0은 거울 (텍셀 크기만큼 걸러 읽기),
+// 나머지는 GGX 중요도 표본 (N = V = R 가정). sample(방향, 원본 단계), lodFor(입체각) → 원본 단계. 하늘 HDRI와 반사 프로브가 같이 쓴다
+template <class Sample, class LodFor>
+void prefilterReflect(const Sample& sample, const LodFor& lodFor, u32 reflectSize, u32 reflectMips, std::vector<u32>& out) {
+    out.clear();
+    for (u32 face = 0; face < 6; ++face)
+        for (u32 mip = 0; mip < reflectMips; ++mip) {
+            const u32 size = std::max(1u, reflectSize >> mip);
+            const f32 roughness = static_cast<f32>(mip) / static_cast<f32>(reflectMips - 1);
+            const f32 a = std::max(roughness * roughness, 1e-4f);
+            for (u32 y = 0; y < size; ++y)
+                for (u32 x = 0; x < size; ++x) {
+                    f32 s, t;
+                    faceTexel(size, x, y, s, t);
+                    const Vec3 n = cubeDirection(face, s, t);
+                    Vec3 c{};
+                    if (mip == 0) {
+                        c = sample(n, lodFor(cubeTexelAngle(size)));
+                    } else {
+                        f32 weight = 0.0f;
+                        for (u32 i = 0; i < kGgxSamples; ++i) {
+                            const Vec3 h = hammersleyGgx(i, kGgxSamples, a, n);
+                            const f32 ndh = std::max(dot(n, h), 0.0f);
+                            const Vec3 l = h * (2.0f * ndh) - n;
+                            const f32 ndl = dot(n, l);
+                            if (ndl <= 0.0f) continue;
+                            const f32 dd = ndh * ndh * (a * a - 1.0f) + 1.0f;
+                            const f32 d = a * a / (kPi * dd * dd);
+                            const f32 pdf = std::max(d * 0.25f, 1e-6f); // D·NdotH / (4·VdotH), N = V
+                            c = c + sample(l, lodFor(1.0f / (static_cast<f32>(kGgxSamples) * pdf)) + 1.0f) * ndl;
+                            weight += ndl;
+                        }
+                        if (weight > 0.0f) c = c * (1.0f / weight);
+                    }
+                    out.push_back(packRgb9e5(c.x, c.y, c.z));
+                }
+        }
+}
+
+// 큐브 면 여섯의 밉 피라미드 (2×2 상자, 선형 rgb). 면 안에서만 쌍선형으로 읽는다 (면 경계는 가장자리 텍셀로 자른다)
+struct CubeSource {
+    std::vector<u32> sizes;                 // 단계마다 면 크기
+    std::vector<std::vector<f32>> levels;   // 단계마다 면 6개 × size² × 3
+
+    void build(const f32* faces, u32 size) {
+        sizes = {size};
+        levels.assign(1, std::vector<f32>(faces, faces + static_cast<size_t>(size) * size * 18));
+        for (f32& v : levels[0]) v = std::isfinite(v) ? std::clamp(v, 0.0f, kRadianceClamp) : 0.0f;
+        while (sizes.back() > 1) {
+            const u32 s = sizes.back(), d = s / 2;
+            const std::vector<f32>& src = levels.back();
+            std::vector<f32> dst(static_cast<size_t>(d) * d * 18);
+            for (u32 face = 0; face < 6; ++face)
+                for (u32 y = 0; y < d; ++y)
+                    for (u32 x = 0; x < d; ++x)
+                        for (u32 c = 0; c < 3; ++c) {
+                            f32 sum = 0.0f;
+                            for (u32 dy = 0; dy < 2; ++dy)
+                                for (u32 dx = 0; dx < 2; ++dx) sum += src[((static_cast<size_t>(face) * s + y * 2 + dy) * s + x * 2 + dx) * 3 + c];
+                            dst[((static_cast<size_t>(face) * d + y) * d + x) * 3 + c] = sum * 0.25f;
+                        }
+            sizes.push_back(d);
+            levels.push_back(std::move(dst));
+        }
+    }
+
+    // 방향 → 면과 s·t (-1..1, cubeDirection의 반대)
+    static void faceOf(Vec3 d, u32& face, f32& s, f32& t) {
+        const f32 ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
+        if (ax >= ay && ax >= az) {
+            face = d.x > 0.0f ? 0 : 1;
+            s = (d.x > 0.0f ? -d.z : d.z) / ax;
+            t = -d.y / ax;
+        } else if (ay >= az) {
+            face = d.y > 0.0f ? 2 : 3;
+            s = d.x / ay;
+            t = (d.y > 0.0f ? d.z : -d.z) / ay;
+        } else {
+            face = d.z > 0.0f ? 4 : 5;
+            s = (d.z > 0.0f ? d.x : -d.x) / az;
+            t = -d.y / az;
+        }
+    }
+
+    Vec3 bilinear(u32 level, u32 face, f32 s, f32 t) const {
+        const u32 size = sizes[level];
+        const std::vector<f32>& l = levels[level];
+        const f32 x = (s * 0.5f + 0.5f) * static_cast<f32>(size) - 0.5f, y = (t * 0.5f + 0.5f) * static_cast<f32>(size) - 0.5f;
+        const f32 fx = std::floor(x), fy = std::floor(y);
+        const f32 tx = x - fx, ty = y - fy;
+        auto at = [&](i32 px, i32 py) {
+            px = std::clamp(px, 0, static_cast<i32>(size) - 1);
+            py = std::clamp(py, 0, static_cast<i32>(size) - 1);
+            const f32* p = &l[((static_cast<size_t>(face) * size + static_cast<size_t>(py)) * size + static_cast<size_t>(px)) * 3];
+            return Vec3{p[0], p[1], p[2]};
+        };
+        const i32 ix = static_cast<i32>(fx), iy = static_cast<i32>(fy);
+        return lerp(lerp(at(ix, iy), at(ix + 1, iy), tx), lerp(at(ix, iy + 1), at(ix + 1, iy + 1), tx), ty);
+    }
+
+    Vec3 sample(Vec3 d, f32 lod) const {
+        u32 face;
+        f32 s, t;
+        faceOf(d, face, s, t);
+        lod = std::clamp(lod, 0.0f, static_cast<f32>(levels.size() - 1));
+        const u32 l0 = static_cast<u32>(lod), l1 = std::min<u32>(l0 + 1, static_cast<u32>(levels.size() - 1));
+        return lerp(bilinear(l0, face, s, t), bilinear(l1, face, s, t), lod - static_cast<f32>(l0));
+    }
+
+    f32 lodFor(f32 solidAngle) const { return std::max(0.0f, 0.5f * std::log2(solidAngle / cubeTexelAngle(sizes[0]))); }
+};
+
 std::string cacheName(const std::string& file) {
     Hasher h;
     h.bytes(file.data(), file.size());
@@ -221,11 +339,6 @@ void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out)
 
     // 하늘 큐브: 면 크기 = 가로/4 (최대 512), 텍셀 입체각에 맞는 단계에서 읽는다
     out.skySize = std::clamp<u32>(width / 4, 16, kMaxSkySize);
-    const auto faceTexel = [](u32 size, u32 x, u32 y, f32& s, f32& t) {
-        s = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(size) * 2.0f - 1.0f;
-        t = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(size) * 2.0f - 1.0f;
-    };
-    const auto cubeTexelAngle = [](u32 size) { return 4.0f * kPi / (6.0f * static_cast<f32>(size) * static_cast<f32>(size)); };
     out.sky.resize(static_cast<size_t>(out.skySize) * out.skySize * 6);
     const f32 skyLod = lodFor(full, cubeTexelAngle(out.skySize));
     for (u32 face = 0; face < 6; ++face)
@@ -237,43 +350,11 @@ void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out)
                 out.sky[(static_cast<size_t>(face) * out.skySize + y) * out.skySize + x] = packRgb9e5(c.x, c.y, c.z);
             }
 
-    // 반사 큐브: 밉 k = 거칠기 k/(밉 수-1). 0은 거울 (텍셀 크기만큼 걸러 읽기), 나머지는 GGX 중요도 표본 (N = V = R 가정)
+    // 반사 큐브 (밉 = 거칠기)
     out.reflectSize = kReflectSize;
     out.reflectMips = kReflectMips;
-    out.reflect.clear();
-    for (u32 face = 0; face < 6; ++face)
-        for (u32 mip = 0; mip < kReflectMips; ++mip) {
-            const u32 size = std::max(1u, kReflectSize >> mip);
-            const f32 roughness = static_cast<f32>(mip) / static_cast<f32>(kReflectMips - 1);
-            const f32 a = std::max(roughness * roughness, 1e-4f);
-            for (u32 y = 0; y < size; ++y)
-                for (u32 x = 0; x < size; ++x) {
-                    f32 s, t;
-                    faceTexel(size, x, y, s, t);
-                    const Vec3 n = cubeDirection(face, s, t);
-                    Vec3 c{};
-                    if (mip == 0) {
-                        c = clamped.sample(n, lodFor(clamped, cubeTexelAngle(size)));
-                    } else {
-                        f32 weight = 0.0f;
-                        for (u32 i = 0; i < kGgxSamples; ++i) {
-                            const Vec3 h = hammersleyGgx(i, kGgxSamples, a, n);
-                            const f32 ndh = std::max(dot(n, h), 0.0f);
-                            const Vec3 l = h * (2.0f * ndh) - n;
-                            const f32 ndl = dot(n, l);
-                            if (ndl <= 0.0f) continue;
-                            const f32 dd = ndh * ndh * (a * a - 1.0f) + 1.0f;
-                            const f32 d = a * a / (kPi * dd * dd);
-                            const f32 pdf = std::max(d * 0.25f, 1e-6f); // D·NdotH / (4·VdotH), N = V
-                            const f32 lod = lodFor(clamped, 1.0f / (static_cast<f32>(kGgxSamples) * pdf)) + 1.0f;
-                            c = c + clamped.sample(l, lod) * ndl;
-                            weight += ndl;
-                        }
-                        if (weight > 0.0f) c = c * (1.0f / weight);
-                    }
-                    out.reflect.push_back(packRgb9e5(c.x, c.y, c.z));
-                }
-        }
+    prefilterReflect([&](Vec3 d, f32 lod) { return clamped.sample(d, lod); },
+                     [&](f32 solidAngle) { return lodFor(clamped, solidAngle); }, kReflectSize, kReflectMips, out.reflect);
 
     // 환경광 SH: 작은 단계(가로 ≤ 128)의 텍셀마다 입체각으로 적분하고, Lambert 합성곱(A_l / π)까지 곱한다
     const Equirect::Level& l = clamped.levels[std::min<size_t>(clamped.levels.size() - 1, static_cast<size_t>(std::max(0.0f, std::log2(static_cast<f32>(width) / 128.0f))))];
@@ -294,6 +375,60 @@ void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out)
     const f32 band[9] = {1.0f, 2.0f / 3.0f, 2.0f / 3.0f, 2.0f / 3.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f};
     for (u32 i = 0; i < 9; ++i)
         for (u32 c = 0; c < 3; ++c) out.sh[i][c] *= band[i];
+}
+
+namespace {
+constexpr u32 kProbeMagic = 0x52504B4D; // "MKPR"
+constexpr u32 kProbeVersion = 1;
+struct ProbeHeader {
+    u32 magic, version, size, mips, reserved[2];
+};
+size_t probeTexels(u32 size, u32 mips) {
+    size_t n = 0;
+    for (u32 mip = 0; mip < mips; ++mip) n += static_cast<size_t>(std::max(1u, size >> mip)) * std::max(1u, size >> mip);
+    return n * 6;
+}
+} // namespace
+
+void bakeProbe(const f32* faces, u32 faceSize, ProbeMap& out) {
+    MEALKIT_ZONE("Probe bake");
+    CubeSource source;
+    source.build(faces, faceSize);
+    out.size = faceSize;
+    out.mips = 1;
+    while ((faceSize >> out.mips) >= 4 && out.mips < kReflectMips) ++out.mips; // 128 → 6밉 (4까지), 하늘 반사와 같은 거칠기 간격
+    prefilterReflect([&](Vec3 d, f32 lod) { return source.sample(d, lod); }, [&](f32 solidAngle) { return source.lodFor(solidAngle); },
+                     out.size, out.mips, out.reflect);
+}
+
+bool saveProbe(const std::string& path, const ProbeMap& probe) {
+    std::string data(sizeof(ProbeHeader) + probe.reflect.size() * 4, '\0');
+    const ProbeHeader hd{kProbeMagic, kProbeVersion, probe.size, probe.mips, {0, 0}};
+    std::memcpy(data.data(), &hd, sizeof(hd));
+    std::memcpy(data.data() + sizeof(hd), probe.reflect.data(), probe.reflect.size() * 4);
+    const size_t slash = path.find_last_of("/\\");
+    if (slash != std::string::npos) createDirectories(path.substr(0, slash));
+    return writeTextFile(path, data);
+}
+
+bool loadProbe(const std::string& path, ProbeMap& out, std::string& error) {
+    std::string file;
+    if (!readTextFile(path, file)) {
+        error = "file not found (bake the probe in the editor)";
+        return false;
+    }
+    ProbeHeader hd{};
+    if (file.size() >= sizeof(hd)) std::memcpy(&hd, file.data(), sizeof(hd));
+    if (hd.magic != kProbeMagic || hd.version != kProbeVersion || hd.size == 0 || hd.size > 1024 || hd.mips == 0 || hd.mips > 16 ||
+        file.size() != sizeof(hd) + probeTexels(hd.size, hd.mips) * 4) {
+        error = "not a probe file of this engine version (bake it again)";
+        return false;
+    }
+    out.size = hd.size;
+    out.mips = hd.mips;
+    out.reflect.resize(probeTexels(hd.size, hd.mips));
+    std::memcpy(out.reflect.data(), file.data() + sizeof(hd), out.reflect.size() * 4);
+    return true;
 }
 
 std::vector<std::string> listHdris(const std::string& assetsRoot) {
