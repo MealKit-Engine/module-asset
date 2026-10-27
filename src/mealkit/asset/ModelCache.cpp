@@ -788,6 +788,35 @@ u32 ModelCache::probe(const std::string& probePath) {
     return entry.id;
 }
 
+u32 ModelCache::lut(const std::string& lutPath) {
+    if (lutPath.empty() || !m_uploadLut) return 0;
+    auto it = m_luts.find(lutPath);
+    if (it != m_luts.end()) return it->second.id;
+    EnvironmentEntry entry;
+    const std::string file = resolve(lutPath);
+    std::string error = "file not found under assets/";
+    entry.time = file.empty() ? 0 : fileWriteTime(file);
+    if (!file.empty()) entry.id = m_uploadLut(m_uploadContext, file, error);
+    if (!entry.id) MEALKIT_WARN("Color LUT %s: %s (no color grading)", lutPath.c_str(), error.c_str());
+    m_luts.emplace(lutPath, entry);
+    return entry.id;
+}
+
+render::PostParams ModelCache::postParams(const scene::PostFields& f) {
+    render::PostParams p;
+    p.toneMapping = f.toneMapping;
+    p.exposure = f.exposure;
+    p.lut = lut(f.lut);
+    p.bloomIntensity = f.bloomIntensity;
+    p.bloomThreshold = f.bloomThreshold;
+    p.bloomTint = f.bloomTint;
+    p.vignette = f.vignette;
+    p.vignetteSmoothness = f.vignetteSmoothness;
+    p.grain = f.grain;
+    p.chromaticAberration = f.chromaticAberration;
+    return p;
+}
+
 void ModelCache::probes(const scene::Scene& scene, std::vector<render::ReflectionProbe>& out) {
     out.clear();
     for (const scene::Entity& e : scene.entities) {
@@ -868,6 +897,11 @@ std::vector<std::string> ModelCache::reloadChanged() {
     for (auto it = m_environments.begin(); it != m_environments.end();) {
         const std::string file = resolve(it->first);
         if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_environments.erase(it);
+        else ++it;
+    }
+    for (auto it = m_luts.begin(); it != m_luts.end();) { // 다시 내보낸 LUT
+        const std::string file = resolve(it->first);
+        if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_luts.erase(it);
         else ++it;
     }
     for (auto it = m_probes.begin(); it != m_probes.end();) { // 다시 구운 반사 프로브

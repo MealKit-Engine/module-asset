@@ -4,10 +4,12 @@
 #include "mealkit/core/Log.h"
 #include "mealkit/core/Profile.h"
 #include "mealkit/platform/Paths.h"
+#include "mealkit/render/Renderer.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #if MEALKIT_DEBUG_UI
@@ -431,17 +433,106 @@ bool loadProbe(const std::string& path, ProbeMap& out, std::string& error) {
     return true;
 }
 
-std::vector<std::string> listHdris(const std::string& assetsRoot) {
+// 종류 폴더 kind/ 아래 어디든 (하위 폴더는 자유) 그 확장자의 파일, assets 기준 경로
+static std::vector<std::string> listKindFiles(const std::string& assetsRoot, const char* kind, const char* extension) {
     std::vector<std::string> out;
-    std::vector<std::string> folders{"textures"}; // 종류 폴더 textures/ 아래 어디든 (하위 폴더는 자유)
+    std::vector<std::string> folders{kind};
     while (!folders.empty()) {
         const std::string folder = folders.back();
         folders.pop_back();
-        for (const std::string& f : listFiles(assetsRoot + "/" + folder, ".hdr")) out.push_back(folder + "/" + f);
+        for (const std::string& f : listFiles(assetsRoot + "/" + folder, extension)) out.push_back(folder + "/" + f);
         for (const std::string& d : listDirectories(assetsRoot + "/" + folder)) folders.push_back(folder + "/" + d);
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+std::vector<std::string> listHdris(const std::string& assetsRoot) { return listKindFiles(assetsRoot, "textures", ".hdr"); }
+std::vector<std::string> listLuts(const std::string& assetsRoot) { return listKindFiles(assetsRoot, "lut", ".cube"); }
+
+bool parseCubeLut(const std::string& text, std::vector<f32>& out, std::string& error) {
+    u32 size = 0;
+    f32 domainMin[3] = {0, 0, 0}, domainMax[3] = {1, 1, 1};
+    std::vector<f32> cells;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (const size_t hash = line.find('#'); hash != std::string::npos) line.resize(hash);
+        const char* s = line.c_str();
+        while (*s == ' ' || *s == '\t') ++s;
+        if (!*s || *s == '\r') continue;
+        f32 v[3];
+        if (std::strncmp(s, "LUT_3D_SIZE", 11) == 0) {
+            size = static_cast<u32>(std::atoi(s + 11));
+        } else if (std::strncmp(s, "LUT_1D_SIZE", 11) == 0) {
+            error = "1D LUTs are not supported (export a 3D LUT)";
+            return false;
+        } else if (std::strncmp(s, "DOMAIN_MIN", 10) == 0) {
+            if (std::sscanf(s + 10, "%f %f %f", &domainMin[0], &domainMin[1], &domainMin[2]) != 3) return error = "bad DOMAIN_MIN", false;
+        } else if (std::strncmp(s, "DOMAIN_MAX", 10) == 0) {
+            if (std::sscanf(s + 10, "%f %f %f", &domainMax[0], &domainMax[1], &domainMax[2]) != 3) return error = "bad DOMAIN_MAX", false;
+        } else if ((*s >= '0' && *s <= '9') || *s == '-' || *s == '.') {
+            if (std::sscanf(s, "%f %f %f", &v[0], &v[1], &v[2]) != 3) return error = "bad table line", false;
+            cells.insert(cells.end(), v, v + 3);
+        } // TITLE 등 다른 키는 건너뛴다
+    }
+    if (size < 2 || size > 256) return error = "missing or invalid LUT_3D_SIZE", false;
+    if (cells.size() != static_cast<size_t>(size) * size * size * 3)
+        return error = "table has " + std::to_string(cells.size() / 3) + " entries, expected " + std::to_string(size * size * size), false;
+
+    // 원본 칸에서 세 선형 보간 (입력 0..1 → 원본 정의역 → 칸 좌표)
+    auto fetch = [&](u32 r, u32 g, u32 b, u32 c) { return cells[((static_cast<size_t>(b) * size + g) * size + r) * 3 + c]; };
+    constexpr u32 n = render::kLutSize;
+    out.resize(static_cast<size_t>(n) * n * n * 3);
+    for (u32 b = 0; b < n; ++b)
+        for (u32 g = 0; g < n; ++g)
+            for (u32 r = 0; r < n; ++r) {
+                const u32 in[3] = {r, g, b};
+                f32 x[3];
+                u32 i0[3], i1[3];
+                f32 t[3];
+                for (u32 k = 0; k < 3; ++k) {
+                    const f32 u = static_cast<f32>(in[k]) / (n - 1);
+                    const f32 span = domainMax[k] - domainMin[k];
+                    x[k] = std::clamp(span > 0.0f ? (u - domainMin[k]) / span : u, 0.0f, 1.0f) * static_cast<f32>(size - 1);
+                    i0[k] = std::min(static_cast<u32>(x[k]), size - 2);
+                    i1[k] = i0[k] + 1;
+                    t[k] = x[k] - static_cast<f32>(i0[k]);
+                }
+                f32* dst = &out[((static_cast<size_t>(b) * n + g) * n + r) * 3];
+                for (u32 c = 0; c < 3; ++c) {
+                    auto lerp1 = [](f32 a, f32 bb, f32 f) { return a + (bb - a) * f; };
+                    const f32 c00 = lerp1(fetch(i0[0], i0[1], i0[2], c), fetch(i1[0], i0[1], i0[2], c), t[0]);
+                    const f32 c10 = lerp1(fetch(i0[0], i1[1], i0[2], c), fetch(i1[0], i1[1], i0[2], c), t[0]);
+                    const f32 c01 = lerp1(fetch(i0[0], i0[1], i1[2], c), fetch(i1[0], i0[1], i1[2], c), t[0]);
+                    const f32 c11 = lerp1(fetch(i0[0], i1[1], i1[2], c), fetch(i1[0], i1[1], i1[2], c), t[0]);
+                    dst[c] = std::clamp(lerp1(lerp1(c00, c10, t[1]), lerp1(c01, c11, t[1]), t[2]), 0.0f, 1.0f);
+                }
+            }
+    return true;
+}
+
+bool loadCubeLut(const std::string& path, std::vector<f32>& out, std::string& error) {
+    std::string text;
+    if (!readTextFile(path, text)) return error = "file not found", false;
+    return parseCubeLut(text, out, error);
+}
+
+bool saveNeutralCubeLut(const std::string& path) {
+    constexpr u32 n = render::kLutSize;
+    std::string text = "# MealKit neutral LUT (grade the capture next to this file, then export a .cube)\nTITLE \"MealKit neutral\"\nLUT_3D_SIZE 32\n";
+    char line[64];
+    for (u32 b = 0; b < n; ++b)
+        for (u32 g = 0; g < n; ++g)
+            for (u32 r = 0; r < n; ++r) {
+                std::snprintf(line, sizeof(line), "%.6f %.6f %.6f\n", static_cast<f32>(r) / (n - 1), static_cast<f32>(g) / (n - 1),
+                              static_cast<f32>(b) / (n - 1));
+                text += line;
+            }
+    return writeTextFile(path, text);
 }
 
 std::string environmentCacheFolder() { return projectRoot() + "/build/cache/environments"; }

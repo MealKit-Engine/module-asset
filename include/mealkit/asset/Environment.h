@@ -30,6 +30,15 @@ bool loadEnvironment(const std::string& hdrPath, EnvironmentMap& out, std::strin
 // assets/textures/ 아래(하위 폴더 포함)의 .hdr 파일 (assets 기준 경로 "textures/hdri/x.hdr", 이름 순). 에디터 [환경] 창·룩데브의 고르기 목록
 std::vector<std::string> listHdris(const std::string& assetsRoot);
 
+// 색 보정 LUT (.cube, Resolve·Photoshop 등이 내보내는 3D LUT): render::kLutSize³ 칸으로 다시 뽑은 sRGB 값 (빨강이 가장 빨리,
+// render::Renderer::createLut). 크기가 다르면 세 선형 보간, DOMAIN_MIN/MAX를 따른다. 1D LUT·잘못된 파일은 false와 이유
+bool parseCubeLut(const std::string& text, std::vector<f32>& out, std::string& error);
+bool loadCubeLut(const std::string& path, std::vector<f32>& out, std::string& error);
+// assets/lut/ 아래의 .cube (환경 패널 고르기, 종류 폴더 lut)
+std::vector<std::string> listLuts(const std::string& assetsRoot);
+// 중립 LUT를 .cube로 쓴다 (보정용 캡처와 같이 두어 외부 도구에서 시작점으로)
+bool saveNeutralCubeLut(const std::string& path);
+
 // 캐시 폴더: 쓰는 곳은 <프로젝트>/build/cache/environments, 읽을 때는 그다음 exe 옆 cache/environments (출시본)
 std::string environmentCacheFolder();
 
