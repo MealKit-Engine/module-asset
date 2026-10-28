@@ -561,7 +561,7 @@ std::string ModelCache::assetsRoot() {
 std::string ModelCache::resolve(const std::string& path) {
     if (path.empty()) return {};
     if (fileExists(path)) return path;
-    return findAsset("assets/" + path);
+    return findAssetFile(path);
 }
 
 namespace {
