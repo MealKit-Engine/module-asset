@@ -27,7 +27,7 @@ using render::Vertex;
 
 constexpr u32 kMaxHullPoints = 1024;
 
-// cgltf의 파일 읽기를 UTF-8 경로(한글 폴더)에서도 동작하게 바꾼다.
+// Makes cgltf's file reading work with UTF-8 paths (Korean folder names) too.
 cgltf_result readFile(const cgltf_memory_options*, const cgltf_file_options*, const char* path, cgltf_size* size,
                       void** data) {
     FILE* f = openFile(path, "rb");
@@ -57,9 +57,9 @@ u32 encodeColor(const f32 linear[4]) {
     return channel(linear[0]) | (channel(linear[1]) << 8) | (channel(linear[2]) << 16) | (channel(linear[3]) << 24);
 }
 
-// 모델 안의 머티리얼 목록 (정점의 material은 불러오는 동안 이 목록의 번호, 렌더러에 올린 뒤 렌더러 번호로 바꾼다)
+// Material list within the model (vertex material is an index into this list while loading, changed to the renderer index after upload)
 struct Materials {
-    std::vector<const cgltf_material*> list; // nullptr = 머티리얼 없는 프리미티브 (기본)
+    std::vector<const cgltf_material*> list; // nullptr = primitive without material (default)
     u16 index(const cgltf_material* m) {
         for (size_t i = 0; i < list.size(); ++i)
             if (list[i] == m) return static_cast<u16>(i);
@@ -68,12 +68,12 @@ struct Materials {
     }
 };
 
-// 스킨 읽기 상태: 스킨 하나(첫 스킨)의 관절 번호 바꾸기 (glTF skin.joints 번호 → Skeleton 번호)
+// Skin reading state: joint index remap for one skin (the first) (glTF skin.joints index → Skeleton index)
 struct SkinState {
     const cgltf_skin* skin = nullptr;
-    std::vector<u8> remap;              // skin.joints 번호 → Skeleton 번호
-    std::vector<const cgltf_node*> nodes; // Skeleton 번호 → 노드
-    i32 jointOf(const cgltf_node* n) const { // 노드 또는 그 조상 중 가장 가까운 관절 (없으면 0: 뿌리)
+    std::vector<u8> remap;              // skin.joints index → Skeleton index
+    std::vector<const cgltf_node*> nodes; // Skeleton index → node
+    i32 jointOf(const cgltf_node* n) const { // the closest joint among the node or its ancestors (0 if none: root)
         for (; n; n = n->parent)
             for (size_t i = 0; i < nodes.size(); ++i)
                 if (nodes[i] == n) return static_cast<i32>(i);
@@ -86,7 +86,7 @@ u32 packWeights(const f32 w[4]) {
     if (sum <= 0.0f) return 0xFFu;
     u32 q[4], total = 0;
     for (int i = 0; i < 4; ++i) total += q[i] = static_cast<u32>(std::lround(std::clamp(w[i] / sum, 0.0f, 1.0f) * 255.0f));
-    // 합을 255로 맞춘다 (가장 큰 가중치에서)
+    // Make the sum 255 (adjusting the largest weight)
     int big = 0;
     for (int i = 1; i < 4; ++i) if (q[i] > q[big]) big = i;
     q[big] = static_cast<u32>(static_cast<i32>(q[big]) + 255 - static_cast<i32>(total));
@@ -113,9 +113,9 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
     }
     if (!positions) return;
     hadNormals = hadNormals && normals != nullptr;
-    const u16 material = materials.index(prim.material); // 기본 색은 머티리얼 표에 (정점 색은 COLOR_0만)
+    const u16 material = materials.index(prim.material); // base color is in the material table (vertex color is COLOR_0 only)
 
-    // 열 우선(column-major) 행렬. 행렬식이 음수면 거울 변환이라 감는 순서를 한 번 더 뒤집는다.
+    // Column-major matrix. If the determinant is negative it's a mirror transform, so the winding order is flipped once more.
     const f32* m = world;
     const f32 det =
         m[0] * (m[5] * m[10] - m[9] * m[6]) - m[4] * (m[1] * m[10] - m[9] * m[2]) + m[8] * (m[1] * m[6] - m[5] * m[2]);
@@ -131,9 +131,9 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
                       m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]};
         const Vec3 wn = normalize(Vec3{m[0] * n[0] + m[4] * n[1] + m[8] * n[2], m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
                                        m[2] * n[0] + m[6] * n[1] + m[10] * n[2]});
-        // glTF는 오른손 좌표계: z를 뒤집어 MealKit(왼손)로 바꾼다. 텍스처 좌표는 glTF 그대로 (v 아래로, DX12와 같다)
+        // glTF is right-handed: flip z to convert to MealKit (left-handed). Texture coordinates stay as glTF (v down, same as DX12)
         out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(c), render::packHalf2(t[0], t[1]), material});
-        if (skin) { // 스킨 모델: 관절이 없는 프리미티브는 가장 가까운 조상 관절에 붙는다 (rigidJoint)
+        if (skin) { // skinned model: primitives without joints attach to the closest ancestor joint (rigidJoint)
             render::SkinWeights sw;
             sw.joints = static_cast<u32>(rigidJoint);
             if (jointsAttr && weightsAttr) {
@@ -150,7 +150,7 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
         }
     }
     const cgltf_size indexCount = prim.indices ? prim.indices->count : positions->count;
-    const bool flip = det >= 0.0f; // z 반전으로 한 번 뒤집히고, 거울 변환이면 다시 뒤집힌다
+    const bool flip = det >= 0.0f; // flipped once by the z inversion, and again for a mirror transform
     for (cgltf_size i = 0; i + 2 < indexCount; i += 3) {
         u32 tri[3];
         for (int k = 0; k < 3; ++k)
@@ -166,7 +166,7 @@ void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals, Material
         f32 world[16];
         cgltf_node_transform_world(node, world);
         const bool ownSkin = skin && node->skin == skin->skin;
-        if (ownSkin) { // glTF: 스킨 메시의 노드 변환은 쓰지 않는다 (정점은 바인드 공간)
+        if (ownSkin) { // glTF: the node transform of a skinned mesh isn't used (vertices are in bind space)
             std::memset(world, 0, sizeof(world));
             world[0] = world[5] = world[10] = world[15] = 1.0f;
         }
@@ -177,14 +177,14 @@ void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals, Material
     for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals, materials, skin);
 }
 
-// glTF 열 우선 행렬 → 행 벡터 규약 Mat4 (메모리 그대로: 열 i가 행 i)
+// glTF column-major matrix → row vector convention Mat4 (memory as is: column i becomes row i)
 Mat4 fromGltf(const f32 m[16]) {
     Mat4 r;
     std::memcpy(&r.m[0][0], m, sizeof(f32) * 16);
     return r;
 }
 
-// 첫 스킨 → Skeleton (부모가 앞에 오게 다시 늘어놓는다). 관절이 너무 많으면 false
+// First skin → Skeleton (reordered so parents come first). false if there are too many joints
 bool readSkeleton(const cgltf_skin& skin, SkinState& state, Skeleton& out, std::string& why) {
     const size_t count = skin.joints_count;
     if (count == 0) return false;
@@ -197,7 +197,7 @@ bool readSkeleton(const cgltf_skin& skin, SkinState& state, Skeleton& out, std::
             if (skin.joints[i] == n) return static_cast<i32>(i);
         return -1;
     };
-    std::vector<i32> parent(count, -1), depth(count, 0); // 스킨 번호로
+    std::vector<i32> parent(count, -1), depth(count, 0); // by skin index
     for (size_t i = 0; i < count; ++i)
         for (const cgltf_node* n = skin.joints[i]->parent; n; n = n->parent) {
             const i32 p = skinIndex(n);
@@ -228,7 +228,7 @@ bool readSkeleton(const cgltf_skin& skin, SkinState& state, Skeleton& out, std::
         if (skin.inverse_bind_matrices) cgltf_accessor_read_float(skin.inverse_bind_matrices, i, ib, 16);
         j.inverseBind = fromGltf(ib);
     }
-    const cgltf_node* top = state.nodes[0]->parent; // 뿌리 관절 위 노드 (Blender 아마추어 오브젝트)
+    const cgltf_node* top = state.nodes[0]->parent; // node above the root joint (Blender armature object)
     if (top) {
         f32 m[16];
         cgltf_node_transform_world(top, m);
@@ -237,8 +237,8 @@ bool readSkeleton(const cgltf_skin& skin, SkinState& state, Skeleton& out, std::
     return true;
 }
 
-// glTF 애니메이션 → 30 Hz로 구운 클립. 관절이 아닌 노드를 움직이는 채널과 모프 가중치는 버린다.
-// 보간: 선형(회전은 nlerp), 계단, 큐빅 스플라인은 키 값 사이 선형으로 (접선은 쓰지 않는다)
+// glTF animation → clip baked at 30 Hz. Channels that move non-joint nodes and morph weights are dropped.
+// Interpolation: linear (rotations nlerp), step, and cubic spline as linear between key values (tangents unused)
 AnimationClip bakeClip(const cgltf_animation& anim, const SkinState& state, const Skeleton& skeleton, size_t index) {
     AnimationClip clip;
     clip.name = anim.name && *anim.name ? anim.name : "clip" + std::to_string(index);
@@ -297,7 +297,7 @@ AnimationClip bakeClip(const cgltf_animation& anim, const SkinState& state, cons
     return clip;
 }
 
-// 지원 범위 밖 머티리얼 기능 (불러올 때 경고하고 무시한다, docs/CODING_MODEL.md "모델·머티리얼·텍스처")
+// Material features outside the supported range (warned and ignored on load, docs/CODING_MODEL.md "Models, materials, textures")
 void warnUnsupported(const std::string& path, const cgltf_material& m) {
     const char* name = m.name ? m.name : "?";
     const auto warn = [&](const char* what) { MEALKIT_WARN("Model %s, material '%s': %s is not supported (ignored)", path.c_str(), name, what); };
@@ -318,7 +318,7 @@ void warnUnsupported(const std::string& path, const cgltf_material& m) {
         if (v->texture && (v->texcoord != 0 || v->has_transform)) warn("a second UV set or texture transform");
 }
 
-// glTF 이미지의 인코딩된 바이트 (glb 안의 buffer view, 또는 .gltf 옆 파일)
+// Encoded bytes of a glTF image (buffer view inside the glb, or a file next to the .gltf)
 bool imageBytes(const cgltf_image& image, const std::string& gltfPath, std::string& out, const u8** data, size_t* size) {
     if (image.buffer_view && image.buffer_view->buffer->data) {
         *data = static_cast<const u8*>(image.buffer_view->buffer->data) + image.buffer_view->offset;
@@ -334,7 +334,7 @@ bool imageBytes(const cgltf_image& image, const std::string& gltfPath, std::stri
         *size = out.size();
         return true;
     }
-    return false; // data URI는 읽지 않는다 (Blender는 glb에 넣는다)
+    return false; // data URIs aren't read (Blender embeds in the glb)
 }
 
 void computeNormals(MeshData& mesh) {
@@ -351,7 +351,7 @@ void computeNormals(MeshData& mesh) {
     for (Vertex& v : mesh.vertices) v.normal = normalize(v.normal);
 }
 
-// 정점 형식 V (첫 필드가 위치)를 정리한다
+// Cleans up vertex format V (first field is position)
 template <class V>
 void optimizeVertices(std::vector<V>& in, std::vector<u32>& indices) {
     const size_t indexCount = indices.size();
@@ -388,7 +388,7 @@ void optimize(MeshData& mesh) {
     }
 }
 
-// LOD: 삼각형을 줄인 메시. 충분히 줄지 않으면 만들지 않는다.
+// LOD: a mesh with reduced triangles. Not created if it doesn't reduce enough.
 bool makeLod(const MeshData& source, f32 ratio, f32 maxError, MeshData& out) {
     const size_t target = static_cast<size_t>(static_cast<f32>(source.indices.size()) * ratio) / 3 * 3;
     std::vector<u32> indices(source.indices.size());
@@ -408,7 +408,7 @@ bool makeLod(const MeshData& source, f32 ratio, f32 maxError, MeshData& out) {
     return true;
 }
 
-// 렌더러에 머티리얼·텍스처를 올리는 함수 (ModelCache::setRenderer, 헤드리스는 없음)
+// Function that uploads materials/textures to the renderer (ModelCache::setRenderer, none for headless)
 struct Uploads {
     u32 (*material)(void*, const render::MaterialData&) = nullptr;
     u32 (*texture)(void*, const void*, size_t, TextureUsage, u32*, std::string&) = nullptr;
@@ -440,7 +440,7 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     MeshData mesh;
     bool hadNormals = true;
     Materials materials;
-    // 스킨: 첫 스킨 하나만 (스킨이 여럿이면 나머지 메시는 바인드 자세 그대로 첫 스킨의 뿌리에 붙는다)
+    // Skin: only the first skin (with multiple skins, remaining meshes attach to the first skin's root in bind pose)
     SkinState skinState;
     model.skeleton = {};
     model.clips.clear();
@@ -466,7 +466,7 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
             if (!data->nodes[i].parent) visitNode(&data->nodes[i], mesh, hadNormals, materials, skin);
     }
 
-    // 머티리얼 → 렌더러 머티리얼 표 (텍스처는 캐시에서). 정점의 material을 렌더러 번호로 바꾼다
+    // Materials → renderer material table (textures from the cache). Changes the vertex material to the renderer index
     std::vector<u16> remap(materials.list.size(), 0);
     for (const cgltf_material* m : materials.list) if (m) warnUnsupported(path, *m);
     model.materials = static_cast<u32>(materials.list.size());
@@ -510,7 +510,7 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
                 md.normalTexture = texture(m->normal_texture, TextureUsage::Normal);
                 md.normalScale = m->normal_texture.scale;
                 if (m->alpha_mode == cgltf_alpha_mode_mask) md.alphaCutoff = std::max(m->alpha_cutoff, 1e-3f);
-                std::vector<std::string> problems; // 스타일 프리셋 머티리얼 기능 (Blender 커스텀 속성 → extras)
+                std::vector<std::string> problems; // style preset material features (Blender custom properties → extras)
                 applyMaterialExtras(m->extras.data, md, problems);
                 for (const std::string& p : problems)
                     MEALKIT_WARN("Model %s, material '%s': %s", path.c_str(), m->name ? m->name : "?", p.c_str());
@@ -526,7 +526,7 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     }
     if (!hadNormals) computeNormals(mesh);
 
-    // 물리 껍질 점과 경계: 최적화 전 원본 정점에서 결정론적으로 뽑는다 (meshoptimizer 결과에 의존하지 않음)
+    // Physics hull points and bounds: extracted deterministically from the original vertices before optimization (not dependent on meshoptimizer output)
     model.boundsMin = {1e30f, 1e30f, 1e30f};
     model.boundsMax = {-1e30f, -1e30f, -1e30f};
     for (const Vertex& v : mesh.vertices) {
@@ -542,7 +542,7 @@ bool loadGltf(const std::string& path, std::vector<MeshData>& lods, Model& model
     const bool skinned = !mesh.skin.empty();
     lods.push_back(std::move(mesh));
     MeshData lod;
-    if (!skinned && makeLod(lods[0], 0.5f, 0.02f, lod)) { // 스킨 메시는 LOD를 만들지 않는다 (캐릭터는 몇 개뿐)
+    if (!skinned && makeLod(lods[0], 0.5f, 0.02f, lod)) { // skinned meshes get no LODs (only a few characters)
         lods.push_back(std::move(lod));
         MeshData lod2;
         if (makeLod(lods[1], 0.4f, 0.05f, lod2)) lods.push_back(std::move(lod2));
@@ -565,7 +565,7 @@ std::string ModelCache::resolve(const std::string& path) {
 }
 
 namespace {
-// 스키마의 예산 종류: 폴더, mealkit.project 키 접두사, 기본 한도 (애드온은 프로젝트 파일 값이 없으면 이것)
+// Schema budget kinds: folder, mealkit.project key prefix, default limits (the add-on uses these if the project file has no values)
 std::string budgetsJson() {
     std::string s;
     const char* keys[kModelKindCount] = {"budgetCharacters", "budgetProps", "budgetEnvironment"};
@@ -579,13 +579,13 @@ std::string budgetsJson() {
     return s + "\n    ";
 }
 
-// 스타일 프리셋 머티리얼 기능의 extras 키 (Blender 커스텀 속성 "mealkit_<key>"). 큰 키(색이 아닌 것)가 기능을 켠다
+// extras keys of style preset material features (Blender custom property "mealkit_<key>"). Main keys (non-color) turn the feature on
 struct FeatureKey {
     const char* key;
-    const char* label; // Blender 패널 (영어)
+    const char* label; // Blender panel (English)
     u32 feature;       // render::kMaterial*
-    bool color;        // 선형 색 세 값 (아니면 숫자 하나)
-    size_t offset;     // render::MaterialData 안의 값
+    bool color;        // three linear color values (otherwise a single number)
+    size_t offset;     // value within render::MaterialData
 };
 const FeatureKey kFeatureKeys[] = {
     {"outline", "Outline width (m)", render::kMaterialOutline, false, offsetof(render::MaterialData, outlineWidth)},
@@ -610,7 +610,7 @@ std::string jsonNumber(f32 v) {
     return buf;
 }
 
-// 스키마 materialFeatures: 애드온 패널이 키마다 "Add" 단추를 만든다. feature는 그 키가 속한 기능(큰 키), default는 엔진 기본값
+// Schema materialFeatures: the add-on panel makes an "Add" button per key. feature is the feature (main key) the key belongs to, default is the engine default
 std::string featuresJson() {
     const render::MaterialData defaults;
     std::string s;
@@ -625,8 +625,8 @@ std::string featuresJson() {
     return s + "\n  ";
 }
 
-// extras JSON 객체의 최상위 키와 값. 숫자·숫자 배열만 값으로 읽고(numbers), 다른 값(문자열·객체·참거짓)은 빈 numbers로 둔다.
-// 형식이 깨지면 거기까지만 (Blender 내보내기가 쓰는 JSON이라 엄격한 검사는 하지 않는다)
+// Top-level keys and values of an extras JSON object. Only numbers/number arrays are read as values (numbers); other values (strings/objects/booleans) get empty numbers.
+// Stops where the format breaks (it's JSON written by the Blender exporter, so no strict validation)
 struct ExtraValue {
     std::string key;
     std::vector<f32> numbers;
@@ -636,7 +636,7 @@ std::vector<ExtraValue> parseExtras(const char* json) {
     std::vector<ExtraValue> out;
     const char* p = json;
     const auto ws = [&] { while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p; };
-    const auto skipString = [&](std::string* text) { // p는 여는 따옴표
+    const auto skipString = [&](std::string* text) { // p is the opening quote
         ++p;
         while (*p && *p != '"') {
             if (*p == '\\' && p[1]) ++p;
@@ -665,7 +665,7 @@ std::vector<ExtraValue> parseExtras(const char* json) {
             if (*p) ++p;
             return;
         }
-        while (*p && *p != ',' && *p != '}' && *p != ']') ++p; // 숫자, true, false, null
+        while (*p && *p != ',' && *p != '}' && *p != ']') ++p; // numbers, true, false, null
     };
     ws();
     if (*p != '{') return out;
@@ -710,8 +710,8 @@ std::vector<ExtraValue> parseExtras(const char* json) {
 } // namespace
 
 std::string modelSchemaJson() {
-    // 불러오기(loadGltf)가 읽는 것과 같게: 삼각형, POSITION·NORMAL·COLOR_0·TEXCOORD_0, glTF PBR(기본 색·법선·금속/거칠기·발광
-    // 텍스처와 계수, 알파 마스크). 노드 변환을 구워 메시 하나로 합친다
+    // Same as what loading (loadGltf) reads: triangles, POSITION/NORMAL/COLOR_0/TEXCOORD_0, glTF PBR (base color/normal/metal-roughness/emissive
+    // textures and factors, alpha mask). Bakes node transforms and merges into one mesh
     std::string s = R"({
   "schemaVersion": 1,
   "blender": "5.2",
@@ -756,7 +756,7 @@ void applyMaterialExtras(const char* json, render::MaterialData& material, std::
         }
         f32* target = reinterpret_cast<f32*>(reinterpret_cast<u8*>(&material) + key->offset);
         for (size_t i = 0; i < want; ++i) target[i] = std::max(v.numbers[i], 0.0f);
-        if (!key->color) material.features |= key->feature; // 큰 키만 기능을 켠다 (색만 있으면 기본 꺼짐)
+        if (!key->color) material.features |= key->feature; // only main keys turn features on (color alone leaves it off by default)
     }
 }
 
@@ -848,7 +848,7 @@ bool ModelCache::load(const std::string& path, Model& out) {
     std::string error = "file not found under assets/";
     if (file.empty() || !loadGltf(file, lods, model, error, {m_uploadMaterial, m_uploadTexture, m_uploadContext})) {
         MEALKIT_WARN("Model %s: %s", path.c_str(), error.c_str());
-        if (!out.valid) out = std::move(model); // 처음이면 실패한 모델로 남긴다 (다시 읽기면 이전 것을 지킨다)
+        if (!out.valid) out = std::move(model); // first time, keep the failed model (on reload, keep the previous one)
         return false;
     }
     model.lodCount = static_cast<u32>(lods.size());
@@ -893,18 +893,18 @@ void ModelCache::setBudgets(const ModelBudget (&budgets)[kModelKindCount]) {
 }
 
 std::vector<std::string> ModelCache::reloadChanged() {
-    // 하늘 HDRI: 바뀐 파일은 지워 두면 다음 environment() 요청이 다시 굽는다
+    // Sky HDRI: erasing changed files makes the next environment() request rebake
     for (auto it = m_environments.begin(); it != m_environments.end();) {
         const std::string file = resolve(it->first);
         if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_environments.erase(it);
         else ++it;
     }
-    for (auto it = m_luts.begin(); it != m_luts.end();) { // 다시 내보낸 LUT
+    for (auto it = m_luts.begin(); it != m_luts.end();) { // re-exported LUTs
         const std::string file = resolve(it->first);
         if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_luts.erase(it);
         else ++it;
     }
-    for (auto it = m_probes.begin(); it != m_probes.end();) { // 다시 구운 반사 프로브
+    for (auto it = m_probes.begin(); it != m_probes.end();) { // rebaked reflection probes
         const std::string file = resolve(it->first);
         if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_probes.erase(it);
         else ++it;
@@ -928,7 +928,7 @@ render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 posi
     const f32 maxScale = std::max({std::fabs(scale.x), std::fabs(scale.y), std::fabs(scale.z)});
     const f32 radius = length(model.boundsMax - model.boundsMin) * 0.5f * maxScale;
     const f32 distance = std::max(length(position - cameraPos), 0.001f);
-    const f32 size = radius / distance; // 화면에서 차지하는 대략적인 비율
+    const f32 size = radius / distance; // rough fraction of the screen covered
     u32 lod = size > 0.08f ? 0 : size > 0.03f ? 1 : 2;
     lod = std::min(lod, model.lodCount - 1);
     return model.lods[lod];

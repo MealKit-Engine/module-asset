@@ -5,61 +5,61 @@
 #include <string>
 #include <vector>
 
-// 하늘 HDRI → 환경광·반사 (docs/ROADMAP.md 2단계 "하늘 HDRI와 환경광", docs/DECISIONS.md 2026-10-26 HDRI).
-// 씬 환경의 `.hdr`(정거리원통 Radiance) 하나에서 불러올 때 굽고 파일로 남긴다:
-//   <프로젝트>/build/cache/environments/<내용 해시>.mkenv   (git 밖, 지우면 다시 굽는다)
-//   - 하늘 큐브맵 (스카이박스, 밉 하나)
-//   - 반사 큐브맵 128² + 밉 (밉 k = 거칠기 k / (밉 수 − 1), GGX 중요도 표본)
-//   - 환경광 구면 조화 9계수 (Lambert 합성곱까지 곱해 셰이더가 법선으로 바로 "환경광 색"을 얻는다)
-// 큐브 면 순서·방향은 DX12/Vulkan 규칙(+X, −X, +Y, −Y, +Z, −Z, MealKit 왼손 y 위)이고 텍셀은 RGB9E5.
-// 굽기는 개발 빌드(디버그 UI가 있는 빌드)만 한다: 출시 빌드는 캐시만 읽는다 (Export가 exe 옆 cache/environments로 복사).
-// 화면 전용이라 시뮬레이션·콘텐츠 해시와 무관하다.
+// Sky HDRI → ambient/reflections (docs/ROADMAP.md stage 2 "Sky HDRI and ambient", docs/DECISIONS.md 2026-10-26 HDRI).
+// Baked from the scene environment's single `.hdr` (equirectangular Radiance) on load and saved to a file:
+//   <project>/build/cache/environments/<content hash>.mkenv   (outside git, rebaked if deleted)
+//   - sky cubemap (skybox, one mip)
+//   - reflection cubemap 128² + mips (mip k = roughness k / (mip count − 1), GGX importance samples)
+//   - 9 ambient spherical harmonic coefficients (Lambert convolution multiplied in, so shaders get the "ambient color" directly from the normal)
+// Cube face order/orientation follows DX12/Vulkan rules (+X, −X, +Y, −Y, +Z, −Z, MealKit left-handed y-up), texels are RGB9E5.
+// Baking happens only in dev builds (builds with debug UI): shipping builds only read the cache (Export copies it to cache/environments next to the exe).
+// View-only, so unrelated to the simulation and content hash.
 namespace mealkit::asset {
 
 struct EnvironmentMap {
-    f32 sh[9][3] = {}; // 환경광 색 = Σ sh[i] · Y_i(n) (Y: 실수 구면 조화 0~2차)
-    u32 skySize = 0;   // 하늘 큐브 면 크기 (밉 하나)
+    f32 sh[9][3] = {}; // ambient color = Σ sh[i] · Y_i(n) (Y: real spherical harmonics orders 0~2)
+    u32 skySize = 0;   // sky cube face size (one mip)
     std::vector<u32> sky;
-    u32 reflectSize = 0, reflectMips = 0; // 반사 큐브 (면마다 밉 0부터)
+    u32 reflectSize = 0, reflectMips = 0; // reflection cube (per face starting from mip 0)
     std::vector<u32> reflect;
 };
 
-// hdrPath(.hdr 파일) → 캐시에서 읽거나, 없으면(개발 빌드) 굽고 캐시에 쓴다. 실패하면 false와 이유
+// hdrPath (.hdr file) → read from cache, or if missing (dev build) bake and write to cache. On failure, false and a reason
 bool loadEnvironment(const std::string& hdrPath, EnvironmentMap& out, std::string& error);
 
-// assets/textures/ 아래(하위 폴더 포함)의 .hdr 파일 (assets 기준 경로 "textures/hdri/x.hdr", 이름 순). 에디터 [환경] 창·룩데브의 고르기 목록
+// .hdr files under assets/textures/ (including subfolders) (paths relative to assets like "textures/hdri/x.hdr", sorted by name). Selection list for the editor [Environment] window and lookdev
 std::vector<std::string> listHdris(const std::string& assetsRoot);
 
-// 색 보정 LUT (.cube, Resolve·Photoshop 등이 내보내는 3D LUT): render::kLutSize³ 칸으로 다시 뽑은 sRGB 값 (빨강이 가장 빨리,
-// render::Renderer::createLut). 크기가 다르면 세 선형 보간, DOMAIN_MIN/MAX를 따른다. 1D LUT·잘못된 파일은 false와 이유
+// Color grading LUT (.cube, 3D LUT exported by Resolve, Photoshop etc.): sRGB values resampled to render::kLutSize³ cells (red fastest,
+// render::Renderer::createLut). Trilinear interpolation if sizes differ, honors DOMAIN_MIN/MAX. 1D LUTs and bad files return false and a reason
 bool parseCubeLut(const std::string& text, std::vector<f32>& out, std::string& error);
 bool loadCubeLut(const std::string& path, std::vector<f32>& out, std::string& error);
-// assets/lut/ 아래의 .cube (환경 패널 고르기, 종류 폴더 lut)
+// .cube files under assets/lut/ (environment panel selection, kind folder lut)
 std::vector<std::string> listLuts(const std::string& assetsRoot);
-// 중립 LUT를 .cube로 쓴다 (보정용 캡처와 같이 두어 외부 도구에서 시작점으로)
+// Writes a neutral LUT as .cube (placed with the grading capture as a starting point in external tools)
 bool saveNeutralCubeLut(const std::string& path);
 
-// 캐시 폴더: 쓰는 곳은 <프로젝트>/build/cache/environments, 읽을 때는 그다음 exe 옆 cache/environments (출시본)
+// Cache folder: written to <project>/build/cache/environments; when reading, also cache/environments next to the exe (shipping)
 std::string environmentCacheFolder();
 
-// 반사 프로브 (docs/ROADMAP.md 2단계 "반사 프로브"): 씬의 reflection_probe 물체 자리에서 에디터가 장면을 큐브 면 여섯으로
-// 그려 읽고(editor/ProbeBaker) 여기서 반사 큐브 + GGX 밉으로 굽는다. 파일은 assets/probes/<씬>_<물체 id>.mkprobe (커밋한다:
-// 출시본은 굽지 않고 이 파일을 읽는다). 하늘 HDRI의 반사 큐브와 같은 배치 (RGB9E5, 면마다 밉 0부터)
+// Reflection probes (docs/ROADMAP.md stage 2 "Reflection probes"): at a scene reflection_probe object's position, the editor renders the scene to six cube faces
+// and reads them back (editor/ProbeBaker), and they're baked here into a reflection cube + GGX mips. Files are assets/probes/<scene>_<object id>.mkprobe (committed:
+// shipping reads these files without baking). Same layout as the sky HDRI reflection cube (RGB9E5, per face starting from mip 0)
 struct ProbeMap {
     u32 size = 0, mips = 0;
     std::vector<u32> reflect;
 };
-// faces: 면 여섯 (+X −X +Y −Y +Z −Z, cubeDirection 방향) × faceSize² × rgb 선형. 크기는 faceSize, 밉은 4까지
+// faces: six faces (+X −X +Y −Y +Z −Z, cubeDirection orientation) × faceSize² × linear rgb. Size is faceSize, mips down to 4
 void bakeProbe(const f32* faces, u32 faceSize, ProbeMap& out);
 bool saveProbe(const std::string& path, const ProbeMap& probe);
 bool loadProbe(const std::string& path, ProbeMap& out, std::string& error);
 
-// --- 굽기 부품 (단위 테스트)
-u32 packRgb9e5(f32 r, f32 g, f32 b); // 음수는 0, 너무 큰 값은 최대로
+// --- Baking parts (unit tests)
+u32 packRgb9e5(f32 r, f32 g, f32 b); // negatives become 0, overly large values the max
 void unpackRgb9e5(u32 v, f32 out[3]);
-Vec3 cubeDirection(u32 face, f32 s, f32 t); // face 0..5, s·t = −1..1 (텍셀 가운데) → 정규화한 방향
-// 정거리원통 그림(rgb float, width × height)에서 굽는다 (파일·캐시 없이)
+Vec3 cubeDirection(u32 face, f32 s, f32 t); // face 0..5, s/t = −1..1 (texel center) → normalized direction
+// Bake from an equirectangular image (rgb float, width × height) (no file/cache)
 void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out);
-Vec3 evalSh(const f32 (&sh)[9][3], Vec3 n); // 셰이더와 같은 계산
+Vec3 evalSh(const f32 (&sh)[9][3], Vec3 n); // same computation as the shader
 
 } // namespace mealkit::asset

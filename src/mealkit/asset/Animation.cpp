@@ -28,7 +28,7 @@ Mat4 composeTrs(const JointPose& p) {
     const Quat q = p.rotation;
     const f32 xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z, xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
     const f32 wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
-    Mat4 m; // 행 = 회전된 축 × 크기 (행 벡터 규약: v * M)
+    Mat4 m; // rows = rotated axes × scale (row vector convention: v * M)
     m.m[0][0] = (1 - 2 * (yy + zz)) * p.scale.x;
     m.m[0][1] = (2 * (xy + wz)) * p.scale.x;
     m.m[0][2] = (2 * (xz - wy)) * p.scale.x;
@@ -67,13 +67,13 @@ void samplePoseTick(const Skeleton& skeleton, const AnimationClip& clip, u32 tic
         framesBetween(skeleton, clip, 0, 0, 0.0f, out);
         return;
     }
-    // 프레임 = tick × 30 / 틱레이트 (정수 나눗셈 + 나머지/틱레이트: 30·60 Hz에서 0과 0.5뿐이라 float로 정확하다)
+    // frame = tick × 30 / tick rate (integer division + remainder/tick rate: at 30/60 Hz only 0 and 0.5, so exact in float)
     const u64 scaled = static_cast<u64>(tick) * kClipFrameRate;
     const u64 last = clip.frames - 1;
     u64 f0 = scaled / tickRate;
     const u32 remainder = static_cast<u32>(scaled % tickRate);
     if (loop) {
-        f0 %= last; // 마지막 프레임 = 첫 프레임 (감는 클립)
+        f0 %= last; // last frame = first frame (looping clip)
     } else if (f0 >= last) {
         framesBetween(skeleton, clip, static_cast<u32>(last), static_cast<u32>(last), 0.0f, out);
         return;
@@ -95,7 +95,7 @@ void jointMatrices(const Skeleton& skeleton, const std::vector<JointPose>& pose,
     for (size_t j = 0; j < count; ++j) {
         const Mat4 local = composeTrs(j < pose.size() ? pose[j] : skeleton.joints[j].rest);
         const i32 parent = skeleton.joints[j].parent;
-        out[j] = local * (parent >= 0 ? out[static_cast<size_t>(parent)] : skeleton.root); // 부모가 앞에 있다
+        out[j] = local * (parent >= 0 ? out[static_cast<size_t>(parent)] : skeleton.root); // parents come first
     }
 }
 
@@ -104,13 +104,13 @@ void skinPalette(const Skeleton& skeleton, const std::vector<JointPose>& pose, s
     jointMatrices(skeleton, pose, world);
     out.resize(world.size());
     for (size_t j = 0; j < world.size(); ++j) {
-        const Mat4 skin = skeleton.joints[j].inverseBind * world[j]; // 정점: 바인드 → 관절 → 월드 (행 벡터)
-        // MealKit은 z가 반대: S·M·S (S = diag(1, 1, -1)). 셰이더는 열 벡터로 곱하므로 행 셋 = 행 벡터 행렬의 열
+        const Mat4 skin = skeleton.joints[j].inverseBind * world[j]; // vertex: bind → joint → world (row vectors)
+        // MealKit has z flipped: S·M·S (S = diag(1, 1, -1)). Shaders multiply with column vectors, so the three rows = columns of the row-vector matrix
         for (int r = 0; r < 3; ++r) {
             const f32 sr = r == 2 ? -1.0f : 1.0f;
             for (int c = 0; c < 4; ++c) {
                 const f32 sc = c == 2 ? -1.0f : 1.0f;
-                out[j].rows[r][c] = skin.m[c][r] * sr * sc; // c = 3은 이동 (행 3)
+                out[j].rows[r][c] = skin.m[c][r] * sr * sc; // c = 3 is translation (row 3)
             }
         }
     }

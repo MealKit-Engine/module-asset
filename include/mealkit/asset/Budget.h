@@ -4,10 +4,10 @@
 
 #include <string>
 
-// 에셋 예산 (docs/ROADMAP.md 2단계 "에셋 예산 경고", docs/CODING_MODEL.md "모델 예산 종류"). 모델 종류는 폴더로 정한다:
-//   assets/models/characters/... = 캐릭터, models/environment/... = 배경, 그 밖 = 소품
-// 한도는 mealkit.project(budget<종류><항목>)에 있고 기본값은 아래 표다 (최소 사양 내장 그래픽 기준, 벤치마크로 고친다).
-// 넘으면 불러올 때 경고하고 에디터 인스펙터·Blender 애드온이 같은 값으로 보여 준다. 시뮬레이션과 무관하다.
+// Asset budgets (docs/ROADMAP.md stage 2 "Asset budget warnings", docs/CODING_MODEL.md "Model budget kinds"). Model kind is decided by folder:
+//   assets/models/characters/... = character, models/environment/... = environment, anything else = prop
+// Limits are in mealkit.project (budget<kind><item>), defaults in the table below (based on min-spec integrated graphics, tuned by benchmark).
+// Exceeding them warns on load, and the editor inspector and Blender add-on show the same values. Unrelated to the simulation.
 namespace mealkit::asset {
 
 enum class ModelKind : u8 { Character, Prop, Environment, Count };
@@ -15,18 +15,18 @@ inline constexpr u32 kModelKindCount = static_cast<u32>(ModelKind::Count);
 
 struct ModelBudget {
     u32 triangles = 0;   // LOD 0
-    u32 textureSize = 0; // 가장 긴 변 (픽셀)
+    u32 textureSize = 0; // longest side (pixels)
     u32 bones = 0;
     u32 materials = 0;
 };
 
 inline constexpr ModelBudget kDefaultBudgets[kModelKindCount] = {
-    {15000, 2048, 64, 4}, // 캐릭터
-    {3000, 1024, 0, 2},   // 소품
-    {20000, 2048, 0, 4},  // 배경
+    {15000, 2048, 64, 4}, // character
+    {3000, 1024, 0, 2},   // prop
+    {20000, 2048, 0, 4},  // environment
 };
 
-// 폴더 이름 = 종류 이름 ("characters", "props", "environment")
+// Folder name = kind name ("characters", "props", "environment")
 inline const char* modelKindFolder(ModelKind kind) {
     switch (kind) {
     case ModelKind::Character: return "characters";
@@ -35,7 +35,7 @@ inline const char* modelKindFolder(ModelKind kind) {
     }
 }
 
-// assets 기준 모델 경로("models/characters/hero.glb")의 종류. 종류 폴더가 아니면 소품
+// Kind of a model path relative to assets ("models/characters/hero.glb"). Prop if not in a kind folder
 inline ModelKind modelKind(const std::string& path) {
     std::string p = path;
     for (char& c : p)

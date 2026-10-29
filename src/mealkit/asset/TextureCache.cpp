@@ -19,9 +19,9 @@
 namespace mealkit::asset {
 namespace {
 
-// 캐시 파일: "MKTX", 형식 버전, 플랫폼 형식 묶음(0 = BC, 5단계 모바일에서 ASTC), rhi::Format, 크기, 밉 수, 데이터
+// Cache file: "MKTX", format version, platform format family (0 = BC, ASTC for mobile in stage 5), rhi::Format, size, mip count, data
 constexpr u32 kMagic = 0x58544B4D; // "MKTX"
-constexpr u32 kVersion = 1;        // 압축 방법을 바꾸면 올린다 (키에 들어가 옛 파일을 쓰지 않는다)
+constexpr u32 kVersion = 1;        // bump when the compression method changes (it's in the key, so old files aren't used)
 constexpr u32 kFamilyBc = 0;
 
 struct Header {
@@ -68,7 +68,7 @@ u8 toSrgb(f32 v) {
 }
 
 #if MEALKIT_DEBUG_UI
-// 4×4 블록마다 압축. 가장자리는 마지막 픽셀을 되풀이한다
+// Compress per 4×4 block. Edges repeat the last pixel
 void compress(const std::vector<u8>& rgba, u32 w, u32 h, TextureUsage usage, std::vector<u8>& out) {
     static const bool ready = [] {
         bc7enc_compress_block_init();
@@ -79,7 +79,7 @@ void compress(const std::vector<u8>& rgba, u32 w, u32 h, TextureUsage usage, std
     bc7enc_compress_block_params params;
     bc7enc_compress_block_params_init(&params);
     if (usage != TextureUsage::Color) bc7enc_compress_block_params_init_linear_weights(&params);
-    params.m_uber_level = 1; // 품질과 속도의 중간 (불러올 때 한 번)
+    params.m_uber_level = 1; // between quality and speed (once at load)
     const u32 bw = (w + 3) / 4, bh = (h + 3) / 4;
     const size_t start = out.size();
     out.resize(start + static_cast<size_t>(bw) * bh * 16);
@@ -121,9 +121,9 @@ void buildMips(const u8* rgba, u32 width, u32 height, bool srgb, bool normal, st
                         for (int c = 0; c < 4; ++c) sum[c] += (srgb && c < 3) ? toLinear(p[c]) : p[c] / 255.0f;
                     }
                 u8* q = &dst[(static_cast<size_t>(y) * nw + x) * 4];
-                if (normal) { // 법선은 평균한 뒤 다시 길이 1로
+                if (normal) { // normals are averaged and renormalized to length 1
                     f32 n[3];
-                    for (int c = 0; c < 3; ++c) n[c] = sum[c] / 2.0f - 1.0f; // (합/4)*2-1
+                    for (int c = 0; c < 3; ++c) n[c] = sum[c] / 2.0f - 1.0f; // (sum/4)*2-1
                     const f32 len = std::max(1e-6f, std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]));
                     for (int c = 0; c < 3; ++c) q[c] = static_cast<u8>(std::clamp(n[c] / len * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
                     q[3] = static_cast<u8>(sum[3] / 4.0f * 255.0f + 0.5f);

@@ -19,21 +19,21 @@
 namespace mealkit::asset {
 namespace {
 
-// 캐시 파일: "MKEV", 형식 버전, 하늘 면 크기, 반사 면 크기, 반사 밉 수, 0, SH 27 floats, 하늘 텍셀, 반사 텍셀 (RGB9E5)
+// Cache file: "MKEV", format version, sky face size, reflection face size, reflection mip count, 0, SH 27 floats, sky texels, reflection texels (RGB9E5)
 constexpr u32 kMagic = 0x56454B4D; // "MKEV"
-constexpr u32 kVersion = 1;        // 굽는 방법을 바꾸면 올린다 (키에 들어가 옛 파일을 쓰지 않는다)
+constexpr u32 kVersion = 1;        // bump when the baking method changes (it's in the key, so old files aren't used)
 constexpr u32 kMaxSkySize = 512;
 constexpr u32 kReflectSize = 128;
 constexpr u32 kReflectMips = 6;   // 128 → 4
-constexpr u32 kGgxSamples = 64;   // 밉마다 텍셀당 표본 (걸러 읽기로 잡음을 줄인다)
-constexpr f32 kRadianceClamp = 16.0f; // 반사·환경광에서 태양 같은 아주 밝은 텍셀을 자른다 (태양은 씬의 태양빛이 맡는다)
+constexpr u32 kGgxSamples = 64;   // samples per texel per mip (filtered reads reduce noise)
+constexpr f32 kRadianceClamp = 16.0f; // clamp very bright texels like the sun in reflections/ambient (the scene's sunlight handles the sun)
 constexpr f32 kPi = 3.14159265358979f;
 
 struct Header {
     u32 magic, version, skySize, reflectSize, reflectMips, reserved;
 };
 
-// 정거리원통 밉 피라미드 (2×2 상자, 선형 rgb)
+// Equirectangular mip pyramid (2×2 box, linear rgb)
 struct Equirect {
     struct Level {
         u32 width = 0, height = 0;
@@ -67,7 +67,7 @@ struct Equirect {
         }
     }
 
-    // 방향 → (u, v): u는 방위각 (+z 앞이 가운데, +x 오른쪽으로 늘어남), v는 위(0)에서 아래(1)
+    // direction → (u, v): u is azimuth (+z forward at center, increasing toward +x right), v from top (0) to bottom (1)
     static void uv(Vec3 d, f32& u, f32& v) {
         u = 0.5f + std::atan2(d.x, d.z) / (2.0f * kPi);
         v = std::acos(std::clamp(d.y, -1.0f, 1.0f)) / kPi;
@@ -79,7 +79,7 @@ struct Equirect {
         const f32 tx = x - fx, ty = y - fy;
         auto at = [&](i32 px, i32 py) {
             const i32 w = static_cast<i32>(l.width), h = static_cast<i32>(l.height);
-            px = ((px % w) + w) % w; // 가로는 이어진다
+            px = ((px % w) + w) % w; // wraps horizontally
             py = std::clamp(py, 0, h - 1);
             const f32* p = &l.rgb[(static_cast<size_t>(py) * l.width + static_cast<size_t>(px)) * 3];
             return Vec3{p[0], p[1], p[2]};
@@ -97,13 +97,13 @@ struct Equirect {
         return lerp(bilinear(levels[l0], u, v), bilinear(levels[l1], u, v), lod - static_cast<f32>(l0));
     }
 
-    // 피라미드 0단계 텍셀 하나의 평균 입체각
+    // Average solid angle of one texel at pyramid level 0
     f32 texelSolidAngle() const { return 4.0f * kPi / (static_cast<f32>(levels[0].width) * static_cast<f32>(levels[0].height)); }
 };
 
 f32 lodFor(const Equirect& e, f32 solidAngle) { return std::max(0.0f, 0.5f * std::log2(solidAngle / e.texelSolidAngle())); }
 
-// 실수 구면 조화 0~2차 (y 위 기준으로 축 이름만 바꾼 표준 상수). 셰이더 Forward.hlsl evalSh와 같다
+// Real spherical harmonics orders 0~2 (standard constants with axes renamed for y-up). Same as evalSh in the Forward.hlsl shader
 void shBasis(Vec3 n, f32 (&y)[9]) {
     y[0] = 0.282095f;
     y[1] = 0.488603f * n.y;
@@ -138,8 +138,8 @@ void faceTexel(u32 size, u32 x, u32 y, f32& s, f32& t) {
 }
 f32 cubeTexelAngle(u32 size) { return 4.0f * kPi / (6.0f * static_cast<f32>(size) * static_cast<f32>(size)); }
 
-// 반사 큐브 (면마다 밉 0부터 out에 붙인다): 밉 k = 거칠기 k/(밉 수-1). 0은 거울 (텍셀 크기만큼 걸러 읽기),
-// 나머지는 GGX 중요도 표본 (N = V = R 가정). sample(방향, 원본 단계), lodFor(입체각) → 원본 단계. 하늘 HDRI와 반사 프로브가 같이 쓴다
+// Reflection cube (appended to out per face starting from mip 0): mip k = roughness k/(mip count-1). 0 is a mirror (filtered read by texel size),
+// the rest are GGX importance samples (assuming N = V = R). sample(direction, source level), lodFor(solid angle) → source level. Shared by sky HDRI and reflection probes
 template <class Sample, class LodFor>
 void prefilterReflect(const Sample& sample, const LodFor& lodFor, u32 reflectSize, u32 reflectMips, std::vector<u32>& out) {
     out.clear();
@@ -177,10 +177,10 @@ void prefilterReflect(const Sample& sample, const LodFor& lodFor, u32 reflectSiz
         }
 }
 
-// 큐브 면 여섯의 밉 피라미드 (2×2 상자, 선형 rgb). 면 안에서만 쌍선형으로 읽는다 (면 경계는 가장자리 텍셀로 자른다)
+// Mip pyramid of the six cube faces (2×2 box, linear rgb). Bilinear reads within a face only (face edges are clamped to edge texels)
 struct CubeSource {
-    std::vector<u32> sizes;                 // 단계마다 면 크기
-    std::vector<std::vector<f32>> levels;   // 단계마다 면 6개 × size² × 3
+    std::vector<u32> sizes;                 // face size per level
+    std::vector<std::vector<f32>> levels;   // per level 6 faces × size² × 3
 
     void build(const f32* faces, u32 size) {
         sizes = {size};
@@ -204,7 +204,7 @@ struct CubeSource {
         }
     }
 
-    // 방향 → 면과 s·t (-1..1, cubeDirection의 반대)
+    // direction → face and s/t (-1..1, inverse of cubeDirection)
     static void faceOf(Vec3 d, u32& face, f32& s, f32& t) {
         const f32 ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
         if (ax >= ay && ax >= az) {
@@ -339,7 +339,7 @@ void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out)
     full.build(rgb, width, height, 65408.0f);
     clamped.build(rgb, width, height, kRadianceClamp);
 
-    // 하늘 큐브: 면 크기 = 가로/4 (최대 512), 텍셀 입체각에 맞는 단계에서 읽는다
+    // Sky cube: face size = width/4 (max 512), read from the level matching the texel solid angle
     out.skySize = std::clamp<u32>(width / 4, 16, kMaxSkySize);
     out.sky.resize(static_cast<size_t>(out.skySize) * out.skySize * 6);
     const f32 skyLod = lodFor(full, cubeTexelAngle(out.skySize));
@@ -352,13 +352,13 @@ void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out)
                 out.sky[(static_cast<size_t>(face) * out.skySize + y) * out.skySize + x] = packRgb9e5(c.x, c.y, c.z);
             }
 
-    // 반사 큐브 (밉 = 거칠기)
+    // Reflection cube (mip = roughness)
     out.reflectSize = kReflectSize;
     out.reflectMips = kReflectMips;
     prefilterReflect([&](Vec3 d, f32 lod) { return clamped.sample(d, lod); },
                      [&](f32 solidAngle) { return lodFor(clamped, solidAngle); }, kReflectSize, kReflectMips, out.reflect);
 
-    // 환경광 SH: 작은 단계(가로 ≤ 128)의 텍셀마다 입체각으로 적분하고, Lambert 합성곱(A_l / π)까지 곱한다
+    // Ambient SH: integrate per texel of a small level (width ≤ 128) by solid angle, and multiply in the Lambert convolution (A_l / π)
     const Equirect::Level& l = clamped.levels[std::min<size_t>(clamped.levels.size() - 1, static_cast<size_t>(std::max(0.0f, std::log2(static_cast<f32>(width) / 128.0f))))];
     std::memset(out.sh, 0, sizeof(out.sh));
     for (u32 y = 0; y < l.height; ++y) {
@@ -366,7 +366,7 @@ void bakeEnvironment(const f32* rgb, u32 width, u32 height, EnvironmentMap& out)
         const f32 solid = (2.0f * kPi / static_cast<f32>(l.width)) * (kPi / static_cast<f32>(l.height)) * std::sin(theta);
         for (u32 x = 0; x < l.width; ++x) {
             const f32 phi = ((static_cast<f32>(x) + 0.5f) / static_cast<f32>(l.width) - 0.5f) * 2.0f * kPi;
-            const Vec3 d{std::sin(theta) * std::sin(phi), std::cos(theta), std::sin(theta) * std::cos(phi)}; // uv()의 반대
+            const Vec3 d{std::sin(theta) * std::sin(phi), std::cos(theta), std::sin(theta) * std::cos(phi)}; // inverse of uv()
             f32 basis[9];
             shBasis(d, basis);
             const f32* p = &l.rgb[(static_cast<size_t>(y) * l.width + x) * 3];
@@ -398,7 +398,7 @@ void bakeProbe(const f32* faces, u32 faceSize, ProbeMap& out) {
     source.build(faces, faceSize);
     out.size = faceSize;
     out.mips = 1;
-    while ((faceSize >> out.mips) >= 4 && out.mips < kReflectMips) ++out.mips; // 128 → 6밉 (4까지), 하늘 반사와 같은 거칠기 간격
+    while ((faceSize >> out.mips) >= 4 && out.mips < kReflectMips) ++out.mips; // 128 → 6 mips (down to 4), same roughness spacing as sky reflection
     prefilterReflect([&](Vec3 d, f32 lod) { return source.sample(d, lod); }, [&](f32 solidAngle) { return source.lodFor(solidAngle); },
                      out.size, out.mips, out.reflect);
 }
@@ -433,7 +433,7 @@ bool loadProbe(const std::string& path, ProbeMap& out, std::string& error) {
     return true;
 }
 
-// 종류 폴더 kind/ 아래 어디든 (하위 폴더는 자유) 그 확장자의 파일, assets 기준 경로
+// Files with that extension anywhere under the kind folder kind/ (any subfolders), paths relative to assets
 static std::vector<std::string> listKindFiles(const std::string& assetsRoot, const char* kind, const char* extension) {
     std::vector<std::string> out;
     std::vector<std::string> folders{kind};
@@ -477,13 +477,13 @@ bool parseCubeLut(const std::string& text, std::vector<f32>& out, std::string& e
         } else if ((*s >= '0' && *s <= '9') || *s == '-' || *s == '.') {
             if (std::sscanf(s, "%f %f %f", &v[0], &v[1], &v[2]) != 3) return error = "bad table line", false;
             cells.insert(cells.end(), v, v + 3);
-        } // TITLE 등 다른 키는 건너뛴다
+        } // skip other keys like TITLE
     }
     if (size < 2 || size > 256) return error = "missing or invalid LUT_3D_SIZE", false;
     if (cells.size() != static_cast<size_t>(size) * size * size * 3)
         return error = "table has " + std::to_string(cells.size() / 3) + " entries, expected " + std::to_string(size * size * size), false;
 
-    // 원본 칸에서 세 선형 보간 (입력 0..1 → 원본 정의역 → 칸 좌표)
+    // Trilinear interpolation over the source grid (input 0..1 → source domain → grid coordinates)
     auto fetch = [&](u32 r, u32 g, u32 b, u32 c) { return cells[((static_cast<size_t>(b) * size + g) * size + r) * 3 + c]; };
     constexpr u32 n = render::kLutSize;
     out.resize(static_cast<size_t>(n) * n * n * 3);
