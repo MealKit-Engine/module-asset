@@ -67,6 +67,7 @@ public:
 
     const Cutscene* find(std::string_view name) const; // nullptr if missing
     u32 count() const { return static_cast<u32>(m_cutscenes.size()); }
+    const Cutscene& at(u32 index) const { return m_cutscenes[index]; }
 
 private:
     std::vector<Cutscene> m_cutscenes;
