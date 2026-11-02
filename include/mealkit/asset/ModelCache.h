@@ -178,7 +178,8 @@ public:
     // A scatter object's instances (fields ScatterFields): whole cells beyond drawDistance are skipped, the rest go per instance through the draw list
     void addScatter(render::DrawList& out, const scene::Entity& layer, Vec3 eye, u32 flags = 0);
 
-    // Hash of the content of all model files the scene references (combined with scene.contentHash() for connection checks).
+    // Hash of the simulation data of the models the scene references: physics hull points and terrain heightmaps
+    // (combined with scene.contentHash() for connection checks; visual meshes, textures and materials aren't included, so platform cooking doesn't change it).
     u64 hashModels(const scene::Scene& scene);
 
     static std::string resolve(const std::string& path); // path relative to assets → real file path

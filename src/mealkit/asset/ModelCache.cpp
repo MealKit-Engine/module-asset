@@ -641,8 +641,10 @@ u64 ModelCache::hashModels(const scene::Scene& scene) {
             continue;
         }
         if (e.model.empty() || e.is(scene::kTypeDecoration) || e.is(scene::kTypeProbe)) continue;
+        // Only what the simulation reads (physics hull points): same on every platform, and retexturing doesn't split matches
         const Model* model = get(e.model);
-        h.add(model ? model->fileHash : 0ull);
+        h.add(model ? static_cast<u64>(model->hullPoints.size()) : ~0ull);
+        if (model) h.bytes(model->hullPoints.data(), model->hullPoints.size() * sizeof(Vec3));
     }
     return h.value;
 }
