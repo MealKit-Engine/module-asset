@@ -24,7 +24,8 @@ struct EnvironmentMap {
     std::vector<u32> reflect;
 };
 
-// hdrPath (.hdr file) → read from cache, or if missing (dev build) bake and write to cache. On failure, false and a reason
+// hdrPath (.hdr file) → read from cache, or if missing (dev build) bake and write to cache. On failure, false and a reason.
+// A path ending in .mkenv (asset/Cooked.h, the cook step) is read as a cache file directly
 bool loadEnvironment(const std::string& hdrPath, EnvironmentMap& out, std::string& error);
 
 // .hdr files under assets/textures/ (including subfolders) (paths relative to assets like "textures/hdri/x.hdr", sorted by name). Selection list for the editor [Environment] window and lookdev
@@ -41,6 +42,8 @@ bool saveNeutralCubeLut(const std::string& path);
 
 // Cache folder: written to <project>/build/cache/environments; when reading, also cache/environments next to the exe (shipping)
 std::string environmentCacheFolder();
+// The cache file loadEnvironment wrote for an .hdr (the cook step copies it into the pack). Empty if not baked yet
+std::string environmentCacheFile(const std::string& hdrPath);
 
 // Reflection probes (docs/ROADMAP.md stage 2 "Reflection probes"): at a scene reflection_probe object's position, the editor renders the scene to six cube faces
 // and reads them back (editor/ProbeBaker), and they're baked here into a reflection cube + GGX mips. Files are assets/probes/<scene>_<object id>.mkprobe (committed:

@@ -1,4 +1,5 @@
 #include "mealkit/asset/Environment.h"
+#include "mealkit/asset/Cooked.h"
 
 #include "mealkit/core/Hash.h"
 #include "mealkit/core/Log.h"
@@ -11,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 #if MEALKIT_DEBUG_UI
 #include "stb_image.h"
@@ -537,8 +539,21 @@ bool saveNeutralCubeLut(const std::string& path) {
 
 std::string environmentCacheFolder() { return projectRoot() + "/build/cache/environments"; }
 
+std::string environmentCacheFile(const std::string& hdrPath) {
+    std::string file;
+    if (!readTextFile(hdrPath, file)) return {};
+    const std::string written = environmentCacheFolder() + "/" + cacheName(file);
+    return fileExists(written) ? written : std::string();
+}
+
 bool loadEnvironment(const std::string& hdrPath, EnvironmentMap& out, std::string& error) {
     MEALKIT_ZONE("Environment cache");
+    const std::string_view cooked = kCookedEnvironmentSuffix;
+    if (hdrPath.size() > cooked.size() && hdrPath.compare(hdrPath.size() - cooked.size(), cooked.size(), cooked) == 0) {
+        if (readCache(hdrPath, out)) return true; // cooked into the pack: the cache file as is
+        error = "cooked environment of another engine version (cook the game again)";
+        return false;
+    }
     std::string file;
     if (!readTextFile(hdrPath, file)) {
         error = "file not found";

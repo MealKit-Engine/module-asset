@@ -1,11 +1,14 @@
 #include "mealkit/asset/Cutscene.h"
 
 #include "mealkit/asset/Animation.h"
+#include "mealkit/asset/Cooked.h"
 #include "mealkit/core/Log.h"
 #include "mealkit/data/Tables.h"
 #include "mealkit/platform/Paths.h"
 
+#if MEALKIT_ASSET_IMPORT
 #include <cgltf.h>
+#endif
 
 #include <algorithm>
 #include <charconv>
@@ -25,6 +28,7 @@ void warn(std::string* warnings, const std::string& text) {
     *warnings += text;
 }
 
+#if MEALKIT_ASSET_IMPORT
 // Rotation part of a column-major glTF matrix (scale removed) → quaternion
 Quat quatFromColumns(const f32 m[16]) {
     Vec3 c0 = normalize(Vec3{m[0], m[1], m[2]}), c1 = normalize(Vec3{m[4], m[5], m[6]}), c2 = normalize(Vec3{m[8], m[9], m[10]});
@@ -95,11 +99,21 @@ bool readBytes(const std::string& path, std::vector<char>& out) {
     fclose(f);
     return read == out.size();
 }
+#endif // MEALKIT_ASSET_IMPORT
 
 } // namespace
 
 bool loadCameraClips(const std::string& file, std::vector<CameraClip>& out, std::string& error) {
     out.clear();
+    const std::string_view cooked = kCookedCameraSuffix; // cooked by the cook step (pack files)
+    if (file.size() > cooked.size() && file.compare(file.size() - cooked.size(), cooked.size(), cooked) == 0) {
+        std::string bytes;
+        if (!readTextFile(file, bytes)) return error = "can't read the file", false;
+        return readCameraClips(bytes, out, error);
+    }
+#if !MEALKIT_ASSET_IMPORT
+    return error = "source glTF files are not read by shipping builds (cook the game again)", false;
+#else
     std::vector<char> bytes;
     if (!readBytes(file, bytes)) {
         error = "can't read the file";
@@ -168,6 +182,7 @@ bool loadCameraClips(const std::string& file, std::vector<CameraClip>& out, std:
     }
     cgltf_free(data);
     return true;
+#endif
 }
 
 CameraKey sampleCamera(const CameraClip& clip, f32 seconds) {
@@ -206,7 +221,8 @@ void Cutscenes::build(const sim::Table<CutsceneRow>& table, std::string* warning
             c.events.emplace_back(at, words[w + 1]);
         }
         std::stable_sort(c.events.begin(), c.events.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-        const std::string path = c.row.file.empty() ? std::string() : findAssetFile(c.row.file);
+        std::string path = c.row.file.empty() ? std::string() : findAssetFile(c.row.file);
+        if (path.empty() && !c.row.file.empty()) path = findAssetFile(c.row.file + kCookedCameraSuffix);
         std::vector<CameraClip> clips;
         std::string error;
         if (path.empty())

@@ -18,8 +18,8 @@
 #include <unordered_map>
 #include <vector>
 
-// glTF (.glb/.gltf) model loading and cache.
-// On load, meshoptimizer dedups vertices, optimizes for cache/overdraw/fetch, and makes up to 2 extra LOD levels.
+// glTF (.glb/.gltf) model loading and cache. Shipping builds read cooked models (asset/Cooked.h) from the pack instead.
+// On import, meshoptimizer dedups vertices, optimizes for cache/overdraw/fetch, and makes up to 2 extra LOD levels.
 // Convex hull points for physics (hullPoints) are taken straight from the file's vertices, so they're the same on every PC.
 namespace mealkit::asset {
 
@@ -93,12 +93,9 @@ public:
         m_uploadMaterial = renderer ? [](void* r, const render::MaterialData& m) {
             return static_cast<render::Renderer*>(r)->createMaterial(m);
         } : nullptr;
-        // Textures: read from the cache or compress and upload (asset/TextureCache.cpp, front end). On failure, kNoTexture and a reason
-        m_uploadTexture = renderer ? [](void* r, const void* encoded, size_t bytes, TextureUsage usage, u32* size,
-                                        std::string& error) {
-            CompressedTexture t;
-            if (!loadCompressedTexture(encoded, bytes, usage, t, error)) return render::kNoTexture;
-            *size = std::max(t.width, t.height);
+        // Textures: compressed by the import (read from the texture cache or compressed, asset/TextureCache.cpp, front end), uploaded here
+        m_compressTexture = renderer ? &loadCompressedTexture : nullptr;
+        m_uploadTexture = renderer ? [](void* r, const CompressedTexture& t) {
             return static_cast<render::Renderer*>(r)->createTexture({t.width, t.height, t.mipLevels, t.format, t.data.data()});
         } : nullptr;
         // Sky HDRI: read from the cache or bake and upload (asset/Environment.cpp, front end). On failure, 0 and a reason
@@ -196,7 +193,8 @@ private:
 
     render::MeshId (*m_upload)(void*, const render::MeshData&) = nullptr;
     u32 (*m_uploadMaterial)(void*, const render::MaterialData&) = nullptr;
-    u32 (*m_uploadTexture)(void*, const void*, size_t, TextureUsage, u32*, std::string&) = nullptr;
+    u32 (*m_uploadTexture)(void*, const CompressedTexture&) = nullptr;
+    bool (*m_compressTexture)(const void*, size_t, TextureUsage, CompressedTexture&, std::string&) = nullptr;
     u32 (*m_uploadEnvironment)(void*, const std::string&, std::string&) = nullptr;
     u32 (*m_uploadProbe)(void*, const std::string&, std::string&) = nullptr;
     u32 (*m_uploadLut)(void*, const std::string&, std::string&) = nullptr;
