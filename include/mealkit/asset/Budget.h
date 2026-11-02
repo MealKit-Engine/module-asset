@@ -18,11 +18,13 @@ struct ModelBudget {
     u32 textureSize = 0; // longest side (pixels)
     u32 bones = 0;
     u32 materials = 0;
+    // Not a load warning: instances smaller on screen than this (bounding radius / distance, the LOD measure) aren't drawn. 0 = always drawn
+    f32 cullSize = 0.0f;
 };
 
 inline constexpr ModelBudget kDefaultBudgets[kModelKindCount] = {
     {15000, 2048, 64, 4}, // character
-    {3000, 1024, 0, 2},   // prop
+    {3000, 1024, 0, 2, 0.004f}, // prop (0.004 = about 2.5 px radius at 720p)
     {20000, 2048, 0, 4},  // environment
 };
 

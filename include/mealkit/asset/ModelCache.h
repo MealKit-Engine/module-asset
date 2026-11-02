@@ -153,7 +153,7 @@ public:
     void setBudgets(const ModelBudget (&budgets)[kModelKindCount]);
     const ModelBudget& budget(ModelKind kind) const { return m_budgets[static_cast<u32>(kind)]; }
 
-    // Picks the LOD by on-screen size.
+    // Picks the LOD by on-screen size. render::kNoMesh below the kind's cullSize (DrawList::add skips it)
     render::MeshId pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const;
 
     // Terrain heightmap (path relative to assets): loaded on first request, nullptr if missing/unreadable (warns once).

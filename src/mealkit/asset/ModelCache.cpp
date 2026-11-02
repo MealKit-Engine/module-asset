@@ -447,6 +447,7 @@ render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 posi
     const f32 radius = length(model.boundsMax - model.boundsMin) * 0.5f * maxScale;
     const f32 distance = std::max(length(position - cameraPos), 0.001f);
     const f32 size = radius / distance; // rough fraction of the screen covered
+    if (size < m_budgets[static_cast<u32>(model.kind)].cullSize) return render::kNoMesh;
     u32 lod = size > 0.08f ? 0 : size > 0.03f ? 1 : 2;
     lod = std::min(lod, model.lodCount - 1);
     return model.lods[lod];
@@ -454,6 +455,7 @@ render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 posi
 
 void addModel(render::DrawList& out, const Model& model, render::MeshId mesh, const render::InstanceData& instance,
               const std::string& anim, f64 seconds) {
+    if (mesh == render::kNoMesh) return; // pickLod: below the cull size
     if (!model.skinned()) {
         out.add(mesh, instance);
         return;
