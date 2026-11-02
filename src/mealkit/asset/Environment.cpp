@@ -291,7 +291,7 @@ bool readCache(const std::string& path, EnvironmentMap& out) {
 } // namespace
 
 u32 packRgb9e5(f32 r, f32 g, f32 b) {
-    constexpr f32 kMax = 65408.0f; // (511 / 512) × 2^16
+    static constexpr f32 kMax = 65408.0f; // (511 / 512) × 2^16
     auto fix = [](f32 v) { return std::isfinite(v) ? std::clamp(v, 0.0f, kMax) : 0.0f; };
     r = fix(r), g = fix(g), b = fix(b);
     const f32 maxc = std::max({r, g, b});
