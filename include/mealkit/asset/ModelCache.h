@@ -4,6 +4,7 @@
 #include "mealkit/asset/Budget.h"
 #include "mealkit/asset/Environment.h"
 #include "mealkit/asset/TextureCache.h"
+#include "mealkit/asset/Scatter.h"
 #include "mealkit/asset/Terrain.h"
 #include "mealkit/core/Math.h"
 #include "mealkit/render/DrawList.h"
@@ -169,6 +170,17 @@ public:
     // Terrain chunks with LOD by distance (instance at the box center, culled per chunk by the draw list). Builds stale meshes first (outside a frame)
     void addTerrain(render::DrawList& out, Terrain& terrain, Vec3 center, Vec3 size, u32 color, u32 flags, Vec3 eye);
 
+    // Scatter layer instances (.scatter relative to assets): loaded on first request; a missing file is an empty layer (painted later).
+    // Edits change items in place and set dirty; saveScatters writes them (editor scene save)
+    struct ScatterEntry {
+        Scatter scatter;
+        bool dirty = false;
+    };
+    ScatterEntry& scatter(const std::string& path);
+    bool saveScatters(std::string& error);
+    // A scatter object's instances (fields ScatterFields): whole cells beyond drawDistance are skipped, the rest go per instance through the draw list
+    void addScatter(render::DrawList& out, const scene::Entity& layer, Vec3 eye, u32 flags = 0);
+
     // Hash of the content of all model files the scene references (combined with scene.contentHash() for connection checks).
     u64 hashModels(const scene::Scene& scene);
 
@@ -178,6 +190,7 @@ public:
 private:
     bool load(const std::string& path, Model& out);
     render::MeshId uploadMesh(const render::MeshData& mesh) { return m_upload(m_uploadContext, mesh); }
+    std::unordered_map<std::string, std::unique_ptr<ScatterEntry>> m_scatters;
     std::unordered_map<std::string, std::unique_ptr<Terrain>> m_terrains; // nullptr = failed (retried when the file changes)
     void (*m_replace)(void*, render::MeshId, const render::MeshData&) = nullptr;
 

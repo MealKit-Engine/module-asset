@@ -1058,6 +1058,67 @@ void ModelCache::addTerrain(render::DrawList& out, Terrain& t, Vec3 center, Vec3
         }
 }
 
+ModelCache::ScatterEntry& ModelCache::scatter(const std::string& path) {
+    std::unique_ptr<ScatterEntry>& slot = m_scatters[path];
+    if (slot) return *slot;
+    slot = std::make_unique<ScatterEntry>();
+    const std::string file = path.empty() ? std::string() : resolve(path);
+    std::string error;
+    if (!file.empty() && !loadScatter(file, slot->scatter, error)) MEALKIT_WARN("Scatter %s: %s", path.c_str(), error.c_str());
+    return *slot;
+}
+
+bool ModelCache::saveScatters(std::string& error) {
+    bool ok = true;
+    for (auto& [path, entry] : m_scatters) {
+        if (!entry || !entry->dirty || path.empty()) continue;
+        std::string file = resolve(path);
+        if (file.empty()) {
+            file = assetsRoot() + "/" + path;
+            createDirectories(file.substr(0, file.find_last_of("/\\")));
+        }
+        std::string reason;
+        if (!saveScatter(file, entry->scatter, reason)) {
+            error += path + ": " + reason + "\n";
+            ok = false;
+            continue;
+        }
+        entry->dirty = false;
+    }
+    return ok;
+}
+
+void ModelCache::addScatter(render::DrawList& out, const scene::Entity& layer, Vec3 eye, u32 flags) {
+    const scene::ScatterFields f = scene::readObject<scene::ScatterFields>(layer);
+    if (f.file.empty()) return;
+    Scatter& s = scatter(f.file).scatter;
+    if (s.items.empty()) return;
+    if (!s.grouped) groupScatter(s);
+    const Model* model = f.model.empty() ? nullptr : get(f.model);
+    const render::MeshId box = model ? 0u : boxMesh();
+    const f32 reach = f.drawDistance + kScatterCellSize * 0.75f; // cell half diagonal
+    for (const ScatterCell& cell : s.cells) {
+        const Vec3 d = cell.center - eye;
+        if (d.x * d.x + d.y * d.y + d.z * d.z > reach * reach) continue;
+        for (u32 k = 0; k < cell.count; ++k) {
+            const ScatterInstance& item = s.items[s.order[cell.first + k]];
+            render::InstanceData inst;
+            inst.rotation = quatFromAxisAngle({0.0f, 1.0f, 0.0f}, item.yaw);
+            inst.color = model ? 0xFFFFFFFFu : layer.color;
+            inst.flags = flags;
+            if (model) {
+                inst.position = item.position;
+                inst.scale = {item.scale, item.scale, item.scale};
+                out.add(pickLod(*model, eye, inst.position, inst.scale), inst);
+            } else { // placeholder: a small box standing on the ground
+                inst.scale = Vec3{0.3f, 0.6f, 0.3f} * item.scale;
+                inst.position = item.position + Vec3{0.0f, inst.scale.y * 0.5f, 0.0f};
+                out.add(box, inst);
+            }
+        }
+    }
+}
+
 u64 ModelCache::hashModels(const scene::Scene& scene) {
     Hasher h;
     for (const scene::Entity& e : scene.entities) {
