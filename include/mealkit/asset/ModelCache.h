@@ -4,6 +4,7 @@
 #include "mealkit/asset/Budget.h"
 #include "mealkit/asset/Environment.h"
 #include "mealkit/asset/TextureCache.h"
+#include "mealkit/asset/Terrain.h"
 #include "mealkit/core/Math.h"
 #include "mealkit/render/DrawList.h"
 #include "mealkit/render/Renderer.h"
@@ -45,6 +46,20 @@ struct Model {
     std::vector<std::string> budgetProblems;
 };
 
+// Heightmap of a terrain object (asset/Terrain.h) + its view chunk meshes (kTerrainLods per chunk, built on first draw and after edits)
+struct Terrain {
+    std::string path; // relative to assets
+    Heightmap map;
+    bool dirty = false; // edited in the editor and not written to the file yet
+    unsigned long long fileTime = 0;
+    // View
+    Vec3 meshSize;                      // box size the meshes were built for (rebuilt when it changes)
+    u32 chunks = 0;                     // per side
+    std::vector<render::MeshId> meshes; // (cz * chunks + cx) * kTerrainLods + lod, kNoMesh until built
+    std::vector<u8> stale;              // per chunk: rebuild before drawing
+};
+inline constexpr render::MeshId kNoMesh = 0xFFFFFFFFu;
+
 // Adds one model to the list: static models via add, skinned models via addSkinned with a palette looping anim ("<clip> [seconds offset]", the scene's kAnimField)
 // at seconds (rest pose if no or empty clip). mesh is the pickLod result (lods[0] for skinned models)
 void addModel(render::DrawList& out, const Model& model, render::MeshId mesh, const render::InstanceData& instance,
@@ -70,6 +85,9 @@ public:
         m_uploadContext = renderer;
         m_upload = renderer ? [](void* r, const render::MeshData& mesh) {
             return static_cast<render::Renderer*>(r)->createMesh(mesh);
+        } : nullptr;
+        m_replace = renderer ? [](void* r, render::MeshId id, const render::MeshData& mesh) {
+            static_cast<render::Renderer*>(r)->replaceMesh(id, mesh);
         } : nullptr;
         m_uploadMaterial = renderer ? [](void* r, const render::MaterialData& m) {
             return static_cast<render::Renderer*>(r)->createMaterial(m);
@@ -140,6 +158,17 @@ public:
     // Picks the LOD by on-screen size.
     render::MeshId pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const;
 
+    // Terrain heightmap (path relative to assets): loaded on first request, nullptr if missing/unreadable (warns once).
+    // Edits (editor brushes) change map in place, then terrainChanged marks the chunks to rebuild
+    Terrain* terrain(const std::string& path);
+    // Replaces (or creates, not yet on disk) a terrain's heightmap: new terrains and imported PNGs in the editor. dirty = not written yet
+    Terrain& setTerrain(const std::string& path, Heightmap map, bool dirty);
+    void terrainChanged(Terrain& terrain, const SampleRect& rect);
+    // Writes edited terrains to their files (editor scene save). false if any failed (reasons in error)
+    bool saveTerrains(std::string& error);
+    // Terrain chunks with LOD by distance (instance at the box center, culled per chunk by the draw list). Builds stale meshes first (outside a frame)
+    void addTerrain(render::DrawList& out, Terrain& terrain, Vec3 center, Vec3 size, u32 color, u32 flags, Vec3 eye);
+
     // Hash of the content of all model files the scene references (combined with scene.contentHash() for connection checks).
     u64 hashModels(const scene::Scene& scene);
 
@@ -149,6 +178,8 @@ public:
 private:
     bool load(const std::string& path, Model& out);
     render::MeshId uploadMesh(const render::MeshData& mesh) { return m_upload(m_uploadContext, mesh); }
+    std::unordered_map<std::string, std::unique_ptr<Terrain>> m_terrains; // nullptr = failed (retried when the file changes)
+    void (*m_replace)(void*, render::MeshId, const render::MeshData&) = nullptr;
 
     render::MeshId (*m_upload)(void*, const render::MeshData&) = nullptr;
     u32 (*m_uploadMaterial)(void*, const render::MaterialData&) = nullptr;

@@ -909,6 +909,13 @@ std::vector<std::string> ModelCache::reloadChanged() {
         if ((file.empty() ? 0 : fileWriteTime(file)) != it->second.time) it = m_probes.erase(it);
         else ++it;
     }
+    for (auto it = m_terrains.begin(); it != m_terrains.end();) { // re-exported heightmaps (edited ones are kept)
+        const std::string file = resolve(it->first);
+        const unsigned long long time = file.empty() ? 0 : fileWriteTime(file);
+        const bool same = it->second ? (it->second->dirty || time == it->second->fileTime) : time == 0;
+        if (same) ++it;
+        else it = m_terrains.erase(it); // reloaded on the next request (old GPU meshes remain, like models)
+    }
     std::vector<std::string> changed;
     for (auto& [path, model] : m_models) {
         const std::string file = resolve(path);
@@ -954,9 +961,111 @@ void addModel(render::DrawList& out, const Model& model, render::MeshId mesh, co
     out.addSkinned(model.lods[0], instance, palette.data(), static_cast<u32>(palette.size()));
 }
 
+Terrain* ModelCache::terrain(const std::string& path) {
+    if (path.empty()) return nullptr;
+    auto it = m_terrains.find(path);
+    if (it != m_terrains.end()) return it->second.get();
+    std::unique_ptr<Terrain> t = std::make_unique<Terrain>();
+    const std::string file = resolve(path);
+    std::string error;
+    if (file.empty() || !loadHeightmap(file, t->map, error)) {
+        MEALKIT_WARN("Terrain %s: %s", path.c_str(), file.empty() ? "file not found" : error.c_str());
+        m_terrains[path] = nullptr;
+        return nullptr;
+    }
+    t->path = path;
+    t->fileTime = fileWriteTime(file);
+    Terrain* out = t.get();
+    m_terrains[path] = std::move(t);
+    return out;
+}
+
+Terrain& ModelCache::setTerrain(const std::string& path, Heightmap map, bool dirty) {
+    std::unique_ptr<Terrain>& slot = m_terrains[path];
+    if (!slot) slot = std::make_unique<Terrain>();
+    slot->path = path;
+    slot->map = std::move(map);
+    slot->dirty = dirty;
+    slot->chunks = 0; // rebuild everything (the size may differ; existing mesh ids are reused)
+    return *slot;
+}
+
+void ModelCache::terrainChanged(Terrain& t, const SampleRect& rect) {
+    if (rect.empty) return;
+    t.dirty = true;
+    if (t.chunks == 0) return;
+    // A sample is shared by the chunks on both sides of it and changes its neighbours' normals
+    auto chunkOf = [&](u32 s) { return std::min(s / kTerrainChunkCells, t.chunks - 1); };
+    const u32 x0 = chunkOf(rect.x0 > 0 ? rect.x0 - 1 : 0), x1 = chunkOf(rect.x1 + 1);
+    const u32 z0 = chunkOf(rect.z0 > 0 ? rect.z0 - 1 : 0), z1 = chunkOf(rect.z1 + 1);
+    for (u32 z = z0; z <= z1; ++z)
+        for (u32 x = x0; x <= x1; ++x) t.stale[z * t.chunks + x] = 1;
+}
+
+bool ModelCache::saveTerrains(std::string& error) {
+    bool ok = true;
+    for (auto& [path, t] : m_terrains) {
+        if (!t || !t->dirty) continue;
+        std::string file = resolve(path);
+        if (file.empty()) { // new file next to the other assets
+            file = assetsRoot() + "/" + path;
+            createDirectories(file.substr(0, file.find_last_of("/\\")));
+        }
+        std::string reason;
+        if (!saveHeightmap(file, t->map, reason)) {
+            error += path + ": " + reason + "\n";
+            ok = false;
+            continue;
+        }
+        t->dirty = false;
+        t->fileTime = fileWriteTime(file);
+    }
+    return ok;
+}
+
+void ModelCache::addTerrain(render::DrawList& out, Terrain& t, Vec3 center, Vec3 size, u32 color, u32 flags, Vec3 eye) {
+    if (!m_upload || !t.map.valid()) return;
+    const u32 chunks = terrainChunks(t.map);
+    if (t.chunks != chunks || t.meshSize.x != size.x || t.meshSize.y != size.y || t.meshSize.z != size.z) {
+        t.chunks = chunks; // first draw or new size: rebuild all
+        t.meshSize = size;
+        t.meshes.resize(static_cast<size_t>(chunks) * chunks * kTerrainLods, kNoMesh);
+        t.stale.assign(static_cast<size_t>(chunks) * chunks, 1);
+    }
+    thread_local render::MeshData mesh;
+    const f32 cellX = size.x / static_cast<f32>(t.map.size - 1), cellZ = size.z / static_cast<f32>(t.map.size - 1);
+    const f32 chunkWidth = std::max(cellX, cellZ) * static_cast<f32>(kTerrainChunkCells);
+    for (u32 cz = 0; cz < chunks; ++cz)
+        for (u32 cx = 0; cx < chunks; ++cx) {
+            const u32 chunk = cz * chunks + cx;
+            if (t.stale[chunk]) {
+                for (u32 lod = 0; lod < kTerrainLods; ++lod) {
+                    buildTerrainChunk(t.map, size, cx, cz, lod, mesh);
+                    render::MeshId& id = t.meshes[chunk * kTerrainLods + lod];
+                    if (id == kNoMesh) id = uploadMesh(mesh);
+                    else m_replace(m_uploadContext, id, mesh);
+                }
+                t.stale[chunk] = 0;
+            }
+            const Vec3 middle = center - size * 0.5f + Vec3{(static_cast<f32>(cx) + 0.5f) * cellX * kTerrainChunkCells, size.y * 0.5f,
+                                                            (static_cast<f32>(cz) + 0.5f) * cellZ * kTerrainChunkCells};
+            const u32 lod = terrainLod(length(middle - eye), chunkWidth);
+            render::InstanceData inst;
+            inst.position = center;
+            inst.color = color;
+            inst.flags = flags;
+            out.add(t.meshes[chunk * kTerrainLods + lod], inst);
+        }
+}
+
 u64 ModelCache::hashModels(const scene::Scene& scene) {
     Hasher h;
     for (const scene::Entity& e : scene.entities) {
+        if (e.is(scene::kTypeTerrain)) { // heightmap samples are collision data
+            const Terrain* t = terrain(scene::terrainFile(e));
+            h.add(t ? t->map.hash() : 0ull);
+            continue;
+        }
         if (e.model.empty() || e.is(scene::kTypeDecoration) || e.is(scene::kTypeProbe)) continue;
         const Model* model = get(e.model);
         h.add(model ? model->fileHash : 0ull);
