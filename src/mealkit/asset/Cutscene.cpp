@@ -11,9 +11,9 @@
 #endif
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace mealkit::asset {
@@ -213,8 +213,9 @@ void Cutscenes::build(const sim::Table<CutsceneRow>& table, std::string* warning
         if (words.size() % 2) warn(warnings, c.name + ": events need \"seconds row\" pairs");
         for (size_t w = 0; w + 1 < words.size(); w += 2) {
             f32 at = 0.0f;
-            const auto r = std::from_chars(words[w].data(), words[w].data() + words[w].size(), at);
-            if (r.ec != std::errc{}) {
+            char* end = nullptr; // strtof: Apple's libc++ has no float std::from_chars
+            at = std::strtof(words[w].c_str(), &end);
+            if (end == words[w].c_str()) {
                 warn(warnings, c.name + ": bad event time '" + words[w] + "'");
                 continue;
             }

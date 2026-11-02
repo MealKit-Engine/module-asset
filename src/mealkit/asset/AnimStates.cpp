@@ -5,8 +5,8 @@
 #include "mealkit/platform/Paths.h"
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
+#include <cstdlib>
 
 namespace mealkit::asset {
 namespace {
@@ -26,8 +26,11 @@ std::vector<std::string_view> words(std::string_view s) {
 }
 
 bool number(std::string_view s, f32& out) {
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), out);
-    return r.ec == std::errc{} && r.ptr == s.data() + s.size();
+    // strtof: Apple's libc++ has no float std::from_chars
+    const std::string text(s);
+    char* end = nullptr;
+    out = std::strtof(text.c_str(), &end);
+    return !text.empty() && end == text.c_str() + text.size();
 }
 
 void warn(std::string* warnings, const std::string& text) {
