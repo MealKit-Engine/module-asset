@@ -272,6 +272,7 @@ u32 ModelCache::lut(const std::string& lutPath) {
 render::PostParams ModelCache::postParams(const scene::PostFields& f) {
     render::PostParams p;
     p.toneMapping = f.toneMapping;
+    p.punchy = f.punchy;
     p.exposure = f.exposure;
     p.lut = lut(f.lut);
     p.bloomIntensity = f.bloomIntensity;
