@@ -1,4 +1,4 @@
-# MealKit-Asset
+# module-asset
 
 > **Beta.** MealKit is in beta: interfaces may still change between minor versions.
 
