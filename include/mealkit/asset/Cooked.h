@@ -2,8 +2,8 @@
 
 #include "mealkit/asset/Animation.h"
 #include "mealkit/asset/Cutscene.h"
-#include "mealkit/asset/TextureCache.h"
-#include "mealkit/render/Renderer.h"
+#include "mealkit/asset/MeshData.h"
+#include "mealkit/asset/ModelGpu.h"
 
 #include <string>
 #include <string_view>
@@ -28,10 +28,10 @@ struct CookedModel {
     u32 bones = 0;                // skin joint count, also when the skin was dropped (budget)
     Skeleton skeleton;
     std::vector<AnimationClip> clips;
-    // Texture fields of materials are indices into textures (render::kNoTexture = none). Vertex material = index into materials
-    std::vector<render::MaterialData> materials;
+    // Texture fields of materials are indices into textures (kNoTexture = none). Vertex material = index into materials
+    std::vector<MaterialData> materials;
     std::vector<CompressedTexture> textures;
-    std::vector<render::MeshData> lods; // lods[0] full detail
+    std::vector<MeshData> lods; // lods[0] full detail
 };
 
 std::string writeCookedModel(const CookedModel& model);
@@ -41,8 +41,7 @@ std::string writeCameraClips(const std::vector<CameraClip>& clips);
 bool readCameraClips(std::string_view bytes, std::vector<CameraClip>& out, std::string& error);
 
 #if MEALKIT_ASSET_IMPORT
-// Texture compression (asset/TextureCache.cpp loadCompressedTexture, front end). nullptr = materials without textures (headless)
-using TextureCompressor = bool (*)(const void* encoded, size_t bytes, TextureUsage usage, CompressedTexture& out, std::string& error);
+// compress: asset/ModelGpu.h TextureCompressor (nullptr = materials without textures, headless)
 // glTF file (absolute path) → cooked model: vertices deduplicated and optimized, up to 2 extra LODs (asset/ModelImport.cpp)
 bool importModel(const std::string& file, CookedModel& out, TextureCompressor compress, std::string& error);
 #endif

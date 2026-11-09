@@ -27,8 +27,6 @@
 namespace mealkit::asset {
 namespace {
 
-using render::MeshData;
-using render::Vertex;
 
 constexpr u32 kMaxHullPoints = 1024;
 
@@ -137,9 +135,9 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
         const Vec3 wn = normalize(Vec3{m[0] * n[0] + m[4] * n[1] + m[8] * n[2], m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
                                        m[2] * n[0] + m[6] * n[1] + m[10] * n[2]});
         // glTF is right-handed: flip z to convert to MealKit (left-handed). Texture coordinates stay as glTF (v down, same as DX12)
-        out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(c), render::packHalf2(t[0], t[1]), material});
+        out.vertices.push_back({{wp.x, wp.y, -wp.z}, {wn.x, wn.y, -wn.z}, encodeColor(c), packHalf2(t[0], t[1]), material});
         if (skin) { // skinned model: primitives without joints attach to the closest ancestor joint (rigidJoint)
-            render::SkinWeights sw;
+            SkinWeights sw;
             sw.joints = static_cast<u32>(rigidJoint);
             if (jointsAttr && weightsAttr) {
                 cgltf_uint j[4] = {};
@@ -374,7 +372,7 @@ void optimizeVertices(std::vector<V>& in, std::vector<u32>& indices) {
 
 struct SkinnedVertex {
     Vertex v;
-    render::SkinWeights s;
+    SkinWeights s;
 };
 
 void optimize(MeshData& mesh) {
@@ -471,26 +469,26 @@ bool importModel(const std::string& path, CookedModel& model, TextureCompressor 
         std::vector<u32> loaded;
         const auto texture = [&](const cgltf_texture_view& view, TextureUsage usage) {
             const cgltf_image* image = view.texture ? view.texture->image : nullptr;
-            if (!image || !compress) return render::kNoTexture;
+            if (!image || !compress) return kNoTexture;
             for (size_t i = 0; i < keys.size(); ++i)
                 if (keys[i].first == image && keys[i].second == usage) return loaded[i];
             std::string storage, why;
             const u8* bytes = nullptr;
             size_t size = 0;
-            u32 index = render::kNoTexture;
+            u32 index = kNoTexture;
             CompressedTexture t;
             if (!imageBytes(*image, path, storage, &bytes, &size)) why = "image data not found (data URIs are not read)";
             else if (compress(bytes, size, usage, t, why)) {
                 index = static_cast<u32>(model.textures.size());
                 model.textures.push_back(std::move(t));
             }
-            if (index == render::kNoTexture) MEALKIT_WARN("Model %s: texture %s: %s", path.c_str(), image->name ? image->name : "?", why.c_str());
+            if (index == kNoTexture) MEALKIT_WARN("Model %s: texture %s: %s", path.c_str(), image->name ? image->name : "?", why.c_str());
             keys.emplace_back(image, usage);
             loaded.push_back(index);
             return index;
         };
         for (const cgltf_material* m : materials.list) {
-            render::MaterialData md;
+            MaterialData md;
             if (m) {
                 const cgltf_pbr_metallic_roughness& pbr = m->pbr_metallic_roughness;
                 if (m->has_pbr_metallic_roughness) {

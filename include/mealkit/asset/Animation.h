@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mealkit/core/Math.h"
-#include "mealkit/render/Mesh.h"
+#include "mealkit/asset/MeshData.h"
 
 #include <string>
 #include <vector>
@@ -45,7 +45,6 @@ struct AnimationClip {
     const JointPose* frame(u32 f, u32 jointCount) const { return &poses[static_cast<size_t>(f) * jointCount]; }
 };
 
-using render::BoneMatrix; // one slot of the view palette (render/Mesh.h)
 
 // Pose of the clip at a time (seconds). With loop, wraps by length; otherwise stops at the end. out has one entry per joint
 void samplePose(const Skeleton& skeleton, const AnimationClip& clip, f32 seconds, bool loop, std::vector<JointPose>& out);

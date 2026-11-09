@@ -12,11 +12,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 namespace mealkit::asset {
-
-using render::MeshData;
-using render::Vertex;
 
 std::string ModelCache::assetsRoot() {
     const std::string found = findAsset("assets");
@@ -49,24 +47,24 @@ std::string budgetsJson() {
 struct FeatureKey {
     const char* key;
     const char* label; // Blender panel (English)
-    u32 feature;       // render::kMaterial*
+    u32 feature;       // kMaterial*
     bool color;        // three linear color values (otherwise a single number)
-    size_t offset;     // value within render::MaterialData
+    size_t offset;     // value within MaterialData
 };
 const FeatureKey kFeatureKeys[] = {
-    {"outline", "Outline width (m)", render::kMaterialOutline, false, offsetof(render::MaterialData, outlineWidth)},
-    {"outlineColor", "Outline color", render::kMaterialOutline, true, offsetof(render::MaterialData, outlineColor)},
-    {"wind", "Wind sway (m, vertex alpha)", render::kMaterialWind, false, offsetof(render::MaterialData, windStrength)},
-    {"rim", "Rim light strength", render::kMaterialRim, false, offsetof(render::MaterialData, rimStrength)},
-    {"rimColor", "Rim light color", render::kMaterialRim, true, offsetof(render::MaterialData, rimColor)},
-    {"dissolve", "Dissolve edge width", render::kMaterialDissolve, false, offsetof(render::MaterialData, dissolveEdge)},
-    {"dissolveColor", "Dissolve edge glow", render::kMaterialDissolve, true, offsetof(render::MaterialData, dissolveColor)},
+    {"outline", "Outline width (m)", kMaterialOutline, false, offsetof(MaterialData, outlineWidth)},
+    {"outlineColor", "Outline color", kMaterialOutline, true, offsetof(MaterialData, outlineColor)},
+    {"wind", "Wind sway (m, vertex alpha)", kMaterialWind, false, offsetof(MaterialData, windStrength)},
+    {"rim", "Rim light strength", kMaterialRim, false, offsetof(MaterialData, rimStrength)},
+    {"rimColor", "Rim light color", kMaterialRim, true, offsetof(MaterialData, rimColor)},
+    {"dissolve", "Dissolve edge width", kMaterialDissolve, false, offsetof(MaterialData, dissolveEdge)},
+    {"dissolveColor", "Dissolve edge glow", kMaterialDissolve, true, offsetof(MaterialData, dissolveColor)},
 };
 
 const char* featureName(u32 feature) {
-    return feature == render::kMaterialOutline ? "outline"
-           : feature == render::kMaterialWind  ? "wind"
-           : feature == render::kMaterialRim   ? "rim"
+    return feature == kMaterialOutline ? "outline"
+           : feature == kMaterialWind  ? "wind"
+           : feature == kMaterialRim   ? "rim"
                                                : "dissolve";
 }
 
@@ -78,7 +76,7 @@ std::string jsonNumber(f32 v) {
 
 // Schema materialFeatures: the add-on panel makes an "Add" button per key. feature is the feature (main key) the key belongs to, default is the engine default
 std::string featuresJson() {
-    const render::MaterialData defaults;
+    const MaterialData defaults;
     std::string s;
     for (const FeatureKey& k : kFeatureKeys) {
         const f32* value = reinterpret_cast<const f32*>(reinterpret_cast<const u8*>(&defaults) + k.offset);
@@ -203,7 +201,7 @@ std::string modelSchemaJson() {
     return s;
 }
 
-void applyMaterialExtras(const char* json, render::MaterialData& material, std::vector<std::string>& problems) {
+void applyMaterialExtras(const char* json, MaterialData& material, std::vector<std::string>& problems) {
     if (!json) return;
     for (const ExtraValue& v : parseExtras(json)) {
         if (v.key.rfind("mealkit_", 0) != 0) continue;
@@ -227,7 +225,7 @@ void applyMaterialExtras(const char* json, render::MaterialData& material, std::
 }
 
 u32 ModelCache::environment(const std::string& hdriPath) {
-    if (hdriPath.empty() || !m_uploadEnvironment) return 0;
+    if (hdriPath.empty() || !m_gpu) return 0;
     auto it = m_environments.find(hdriPath);
     if (it != m_environments.end()) return it->second.id;
     EnvironmentEntry entry;
@@ -235,64 +233,38 @@ u32 ModelCache::environment(const std::string& hdriPath) {
     if (file.empty()) file = resolve(hdriPath + kCookedEnvironmentSuffix); // baked by the cook step (pack files)
     std::string error = "file not found under assets/";
     entry.time = file.empty() ? 0 : fileWriteTime(file);
-    if (!file.empty()) entry.id = m_uploadEnvironment(m_uploadContext, file, error);
+    if (!file.empty()) entry.id = m_gpu->createEnvironment(file, error);
     if (!entry.id) MEALKIT_WARN("Sky HDRI %s: %s (using the sky colors)", hdriPath.c_str(), error.c_str());
     m_environments.emplace(hdriPath, entry);
     return entry.id;
 }
 
 u32 ModelCache::probe(const std::string& probePath) {
-    if (probePath.empty() || !m_uploadProbe) return 0;
+    if (probePath.empty() || !m_gpu) return 0;
     auto it = m_probes.find(probePath);
     if (it != m_probes.end()) return it->second.id;
     EnvironmentEntry entry;
     const std::string file = resolve(probePath);
     std::string error = "file not found under assets/ (bake the probe in the editor)";
     entry.time = file.empty() ? 0 : fileWriteTime(file);
-    if (!file.empty()) entry.id = m_uploadProbe(m_uploadContext, file, error);
+    if (!file.empty()) entry.id = m_gpu->createProbe(file, error);
     if (!entry.id) MEALKIT_WARN("Reflection probe %s: %s (using the sky reflection)", probePath.c_str(), error.c_str());
     m_probes.emplace(probePath, entry);
     return entry.id;
 }
 
 u32 ModelCache::lut(const std::string& lutPath) {
-    if (lutPath.empty() || !m_uploadLut) return 0;
+    if (lutPath.empty() || !m_gpu) return 0;
     auto it = m_luts.find(lutPath);
     if (it != m_luts.end()) return it->second.id;
     EnvironmentEntry entry;
     const std::string file = resolve(lutPath);
     std::string error = "file not found under assets/";
     entry.time = file.empty() ? 0 : fileWriteTime(file);
-    if (!file.empty()) entry.id = m_uploadLut(m_uploadContext, file, error);
+    if (!file.empty()) entry.id = m_gpu->createLut(file, error);
     if (!entry.id) MEALKIT_WARN("Color LUT %s: %s (no color grading)", lutPath.c_str(), error.c_str());
     m_luts.emplace(lutPath, entry);
     return entry.id;
-}
-
-render::PostParams ModelCache::postParams(const scene::PostFields& f) {
-    render::PostParams p;
-    p.toneMapping = f.toneMapping;
-    p.punchy = f.punchy;
-    p.exposure = f.exposure;
-    p.lut = lut(f.lut);
-    p.bloomIntensity = f.bloomIntensity;
-    p.bloomThreshold = f.bloomThreshold;
-    p.bloomTint = f.bloomTint;
-    p.vignette = f.vignette;
-    p.vignetteSmoothness = f.vignetteSmoothness;
-    p.grain = f.grain;
-    p.chromaticAberration = f.chromaticAberration;
-    return p;
-}
-
-void ModelCache::probes(const scene::Scene& scene, std::vector<render::ReflectionProbe>& out) {
-    out.clear();
-    for (const scene::Entity& e : scene.entities) {
-        if (!e.is(scene::kTypeProbe) || out.size() >= m_probeLimit) continue;
-        const u32 id = probe(scene::probeFile(e));
-        const scene::Transform world = scene::worldTransform(scene, e);
-        if (id) out.push_back({world.position, Vec3{std::fabs(world.scale.x), std::fabs(world.scale.y), std::fabs(world.scale.z)} * 0.5f, id});
-    }
 }
 
 const Model* ModelCache::get(const std::string& path) {
@@ -322,7 +294,7 @@ bool ModelCache::load(const std::string& path, Model& out) {
         ok = readTextFile(cookedFile, bytes) && readCookedModel(bytes, cooked, error);
     } else if (!file.empty()) {
 #if MEALKIT_ASSET_IMPORT
-        ok = importModel(file, cooked, m_compressTexture, error);
+        ok = importModel(file, cooked, m_gpu ? m_gpu->textureCompressor() : nullptr, error);
 #else
         error = "source models are not read by shipping builds (cook the game again)";
 #endif
@@ -342,20 +314,20 @@ bool ModelCache::load(const std::string& path, Model& out) {
     model.materials = static_cast<u32>(cooked.materials.size());
 
     // Textures → materials → vertex material indices into the renderer tables
-    std::vector<u32> textureIds(cooked.textures.size(), render::kNoTexture);
+    std::vector<u32> textureIds(cooked.textures.size(), kNoTexture);
     for (size_t i = 0; i < cooked.textures.size(); ++i) {
         const CompressedTexture& t = cooked.textures[i];
         model.textureSize = std::max({model.textureSize, t.width, t.height});
-        if (m_uploadTexture) textureIds[i] = m_uploadTexture(m_uploadContext, t);
-        if (!m_uploadTexture || textureIds[i] != render::kNoTexture) ++model.textures;
+        if (m_gpu) textureIds[i] = m_gpu->createTexture(t);
+        if (!m_gpu || textureIds[i] != kNoTexture) ++model.textures;
     }
     std::vector<u16> remap(cooked.materials.size(), 0);
-    if (m_uploadMaterial)
+    if (m_gpu)
         for (size_t i = 0; i < cooked.materials.size(); ++i) {
-            render::MaterialData md = cooked.materials[i];
+            MaterialData md = cooked.materials[i];
             for (u32* t : {&md.baseColorTexture, &md.normalTexture, &md.metallicRoughnessTexture, &md.emissiveTexture})
-                *t = *t < textureIds.size() ? textureIds[*t] : render::kNoTexture;
-            remap[i] = static_cast<u16>(m_uploadMaterial(m_uploadContext, md));
+                *t = *t < textureIds.size() ? textureIds[*t] : kNoTexture;
+            remap[i] = static_cast<u16>(m_gpu->createMaterial(md));
         }
     std::vector<MeshData>& lods = cooked.lods;
     for (MeshData& lod : lods)
@@ -364,7 +336,7 @@ bool ModelCache::load(const std::string& path, Model& out) {
     model.lodCount = static_cast<u32>(lods.size());
     for (u32 i = 0; i < model.lodCount; ++i) {
         model.triangles[i] = static_cast<u32>(lods[i].indices.size() / 3);
-        if (m_upload) model.lods[i] = uploadMesh(lods[i]);
+        if (m_gpu) model.lods[i] = m_gpu->createMesh(lods[i]);
     }
     model.valid = true;
     model.kind = modelKind(path);
@@ -438,41 +410,20 @@ std::vector<std::string> ModelCache::reloadChanged() {
     return changed;
 }
 
-render::MeshId ModelCache::boxMesh() {
-    if (m_box == 0xFFFFFFFFu && m_upload) m_box = uploadMesh(render::makeBox());
+MeshId ModelCache::boxMesh() {
+    if (m_box == kNoMesh && m_gpu) m_box = m_gpu->createMesh(makeBox());
     return m_box;
 }
 
-render::MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const {
+MeshId ModelCache::pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const {
     const f32 maxScale = std::max({std::fabs(scale.x), std::fabs(scale.y), std::fabs(scale.z)});
     const f32 radius = length(model.boundsMax - model.boundsMin) * 0.5f * maxScale;
     const f32 distance = std::max(length(position - cameraPos), 0.001f);
     const f32 size = radius / distance; // rough fraction of the screen covered
-    if (size < m_budgets[static_cast<u32>(model.kind)].cullSize) return render::kNoMesh;
+    if (size < m_budgets[static_cast<u32>(model.kind)].cullSize) return kNoMesh;
     u32 lod = size > 0.08f ? 0 : size > 0.03f ? 1 : 2;
     lod = std::min(lod, model.lodCount - 1);
     return model.lods[lod];
-}
-
-void addModel(render::DrawList& out, const Model& model, render::MeshId mesh, const render::InstanceData& instance,
-              const std::string& anim, f64 seconds) {
-    if (mesh == render::kNoMesh) return; // pickLod: below the cull size
-    if (!model.skinned()) {
-        out.add(mesh, instance);
-        return;
-    }
-    thread_local std::vector<JointPose> pose;
-    thread_local std::vector<BoneMatrix> palette;
-    const size_t space = anim.find(' ');
-    const AnimationClip* clip = anim.empty() ? nullptr : findClip(model.clips, anim.substr(0, space));
-    if (clip) {
-        const f64 offset = space == std::string::npos ? 0.0 : std::atof(anim.c_str() + space + 1);
-        samplePose(model.skeleton, *clip, static_cast<f32>(std::fmod(seconds + offset, 4096.0)), true, pose);
-    } else {
-        restPose(model.skeleton, pose);
-    }
-    skinPalette(model.skeleton, pose, palette);
-    out.addSkinned(model.lods[0], instance, palette.data(), static_cast<u32>(palette.size()));
 }
 
 Terrain* ModelCache::terrain(const std::string& path) {
@@ -537,8 +488,8 @@ bool ModelCache::saveTerrains(std::string& error) {
     return ok;
 }
 
-void ModelCache::addTerrain(render::DrawList& out, Terrain& t, Vec3 center, Vec3 size, u32 color, u32 flags, Vec3 eye) {
-    if (!m_upload || !t.map.valid()) return;
+bool ModelCache::buildTerrainMeshes(Terrain& t, Vec3 size) {
+    if (!m_gpu || !t.map.valid()) return false;
     const u32 chunks = terrainChunks(t.map);
     if (t.chunks != chunks || t.meshSize.x != size.x || t.meshSize.y != size.y || t.meshSize.z != size.z) {
         t.chunks = chunks; // first draw or new size: rebuild all
@@ -546,30 +497,20 @@ void ModelCache::addTerrain(render::DrawList& out, Terrain& t, Vec3 center, Vec3
         t.meshes.resize(static_cast<size_t>(chunks) * chunks * kTerrainLods, kNoMesh);
         t.stale.assign(static_cast<size_t>(chunks) * chunks, 1);
     }
-    thread_local render::MeshData mesh;
-    const f32 cellX = size.x / static_cast<f32>(t.map.size - 1), cellZ = size.z / static_cast<f32>(t.map.size - 1);
-    const f32 chunkWidth = std::max(cellX, cellZ) * static_cast<f32>(kTerrainChunkCells);
+    thread_local MeshData mesh;
     for (u32 cz = 0; cz < chunks; ++cz)
         for (u32 cx = 0; cx < chunks; ++cx) {
             const u32 chunk = cz * chunks + cx;
-            if (t.stale[chunk]) {
-                for (u32 lod = 0; lod < kTerrainLods; ++lod) {
-                    buildTerrainChunk(t.map, size, cx, cz, lod, mesh);
-                    render::MeshId& id = t.meshes[chunk * kTerrainLods + lod];
-                    if (id == kNoMesh) id = uploadMesh(mesh);
-                    else m_replace(m_uploadContext, id, mesh);
-                }
-                t.stale[chunk] = 0;
+            if (!t.stale[chunk]) continue;
+            for (u32 lod = 0; lod < kTerrainLods; ++lod) {
+                buildTerrainChunk(t.map, size, cx, cz, lod, mesh);
+                MeshId& id = t.meshes[chunk * kTerrainLods + lod];
+                if (id == kNoMesh) id = m_gpu->createMesh(mesh);
+                else m_gpu->replaceMesh(id, mesh);
             }
-            const Vec3 middle = center - size * 0.5f + Vec3{(static_cast<f32>(cx) + 0.5f) * cellX * kTerrainChunkCells, size.y * 0.5f,
-                                                            (static_cast<f32>(cz) + 0.5f) * cellZ * kTerrainChunkCells};
-            const u32 lod = terrainLod(length(middle - eye), chunkWidth);
-            render::InstanceData inst;
-            inst.position = center;
-            inst.color = color;
-            inst.flags = flags;
-            out.add(t.meshes[chunk * kTerrainLods + lod], inst);
+            t.stale[chunk] = 0;
         }
+    return true;
 }
 
 ModelCache::ScatterEntry& ModelCache::scatter(const std::string& path) {
@@ -600,37 +541,6 @@ bool ModelCache::saveScatters(std::string& error) {
         entry->dirty = false;
     }
     return ok;
-}
-
-void ModelCache::addScatter(render::DrawList& out, const scene::Entity& layer, Vec3 eye, u32 flags) {
-    const scene::ScatterFields f = scene::readObject<scene::ScatterFields>(layer);
-    if (f.file.empty()) return;
-    Scatter& s = scatter(f.file).scatter;
-    if (s.items.empty()) return;
-    if (!s.grouped) groupScatter(s);
-    const Model* model = f.model.empty() ? nullptr : get(f.model);
-    const render::MeshId box = model ? 0u : boxMesh();
-    const f32 reach = f.drawDistance + kScatterCellSize * 0.75f; // cell half diagonal
-    for (const ScatterCell& cell : s.cells) {
-        const Vec3 d = cell.center - eye;
-        if (d.x * d.x + d.y * d.y + d.z * d.z > reach * reach) continue;
-        for (u32 k = 0; k < cell.count; ++k) {
-            const ScatterInstance& item = s.items[s.order[cell.first + k]];
-            render::InstanceData inst;
-            inst.rotation = quatFromAxisAngle({0.0f, 1.0f, 0.0f}, item.yaw);
-            inst.color = model ? 0xFFFFFFFFu : layer.color;
-            inst.flags = flags;
-            if (model) {
-                inst.position = item.position;
-                inst.scale = {item.scale, item.scale, item.scale};
-                out.add(pickLod(*model, eye, inst.position, inst.scale), inst);
-            } else { // placeholder: a small box standing on the ground
-                inst.scale = Vec3{0.3f, 0.6f, 0.3f} * item.scale;
-                inst.position = item.position + Vec3{0.0f, inst.scale.y * 0.5f, 0.0f};
-                out.add(box, inst);
-            }
-        }
-    }
 }
 
 u64 ModelCache::hashModels(const scene::Scene& scene) {

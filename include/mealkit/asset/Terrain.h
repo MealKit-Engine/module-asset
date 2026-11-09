@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mealkit/core/Math.h"
-#include "mealkit/render/Mesh.h"
+#include "mealkit/asset/MeshData.h"
 
 #include <string>
 #include <vector>
@@ -42,7 +42,7 @@ inline constexpr u32 kTerrainChunkCells = 32; // cells per chunk side at LOD 0
 inline constexpr u32 kTerrainLods = 3;        // LOD n skips 2^n samples
 u32 terrainChunks(const Heightmap& map);      // chunks per side
 // One chunk's mesh, vertices relative to the box center (instance at the center, scale 1), with skirts that hide cracks between LODs
-void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod, render::MeshData& out);
+void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod, MeshData& out);
 // LOD by distance from the camera to the chunk center (in chunk widths)
 u32 terrainLod(f32 distance, f32 chunkWidth);
 

@@ -3,11 +3,10 @@
 @format module 1
 type engine
 name asset
-version 0.1.2
+version 0.2.0
 engine 0.9
 kind sim
 layer core
 requires data 0.1 scene 0.1 sim 0.1
 tags asset
-transitional render rhi
-summary Models, animation, cutscenes, terrain, texture cache, cooking
+summary Models, mesh and material data, animation, cutscenes, terrain, cooking

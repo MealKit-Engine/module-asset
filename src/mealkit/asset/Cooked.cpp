@@ -69,7 +69,7 @@ struct Reader {
 };
 
 // Sizes of the structs written as is: a layout change reads as "cook again"
-constexpr u32 kLayout = static_cast<u32>(sizeof(render::Vertex) | sizeof(render::MaterialData) << 8 | sizeof(JointPose) << 16) ^
+constexpr u32 kLayout = static_cast<u32>(sizeof(Vertex) | sizeof(MaterialData) << 8 | sizeof(JointPose) << 16) ^
                         static_cast<u32>(sizeof(Mat4) << 24);
 
 bool header(Reader& r, u32 magic, u32 version, std::string& error) {
@@ -119,7 +119,7 @@ std::string writeCookedModel(const CookedModel& m) {
         w.array(t.data);
     }
     w.pod(static_cast<u32>(m.lods.size()));
-    for (const render::MeshData& mesh : m.lods) {
+    for (const MeshData& mesh : m.lods) {
         w.array(mesh.vertices);
         w.array(mesh.indices);
         w.array(mesh.skin);
@@ -169,7 +169,7 @@ bool readCookedModel(std::string_view bytes, CookedModel& m, std::string& error)
     }
     r.pod(n);
     for (u32 i = 0; i < n && r.ok; ++i) {
-        render::MeshData mesh;
+        MeshData mesh;
         r.array(mesh.vertices);
         r.array(mesh.indices);
         r.array(mesh.skin);

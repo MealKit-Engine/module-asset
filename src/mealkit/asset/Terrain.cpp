@@ -229,7 +229,7 @@ u32 terrainLod(f32 distance, f32 chunkWidth) {
     return widths < 2.5f ? 0u : widths < 5.0f ? 1u : 2u;
 }
 
-void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod, render::MeshData& out) {
+void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod, MeshData& out) {
     out.vertices.clear();
     out.indices.clear();
     out.skin.clear();
@@ -251,10 +251,10 @@ void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod,
         const u32 xl = x > 0 ? x - 1 : x, xr = std::min(x + 1, cells), zd = z > 0 ? z - 1 : z, zu = std::min(z + 1, cells);
         const Vec3 n = normalize(Vec3{-(h(xr, z) - h(xl, z)) / (static_cast<f32>(xr - xl) * g.dx), 1.0f,
                                   -(h(x, zu) - h(x, zd)) / (static_cast<f32>(zu - zd) * g.dz)});
-        render::Vertex v;
+        Vertex v;
         v.position = {g.origin.x + static_cast<f32>(x) * g.dx, g.origin.y + h(x, z) - drop, g.origin.z + static_cast<f32>(z) * g.dz};
         v.normal = n;
-        v.uv = render::packHalf2(static_cast<f32>(x) * uvScale, static_cast<f32>(z) * uvScale);
+        v.uv = packHalf2(static_cast<f32>(x) * uvScale, static_cast<f32>(z) * uvScale);
         out.vertices.push_back(v);
     };
     const u32 w = static_cast<u32>(xs.size());
@@ -263,14 +263,14 @@ void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod,
     for (u32 j = 0; j + 1 < zs.size(); ++j)
         for (u32 i = 0; i + 1 < w; ++i) {
             const u32 a = j * w + i, b = a + 1, d = a + w, c = d + 1;
-            out.indices.insert(out.indices.end(), {a, d, c, a, c, b}); // front face clockwise from above (render::makeBox)
+            out.indices.insert(out.indices.end(), {a, d, c, a, c, b}); // front face clockwise from above (makeBox)
         }
     // Skirts: each edge copied downward, both windings (seen from either side)
     const f32 drop = g.height * 0.02f + std::max(g.dx, g.dz) * static_cast<f32>(step);
     auto skirt = [&](auto index, u32 count) {
         const u32 base = static_cast<u32>(out.vertices.size());
         for (u32 k = 0; k < count; ++k) {
-            render::Vertex v = out.vertices[index(k)];
+            Vertex v = out.vertices[index(k)];
             v.position.y -= drop;
             out.vertices.push_back(v);
         }
