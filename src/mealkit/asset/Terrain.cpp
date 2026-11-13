@@ -10,17 +10,13 @@
 #include <cstdlib>
 #include <cstring>
 
-// Core-side PNG decode/encode (headless servers load heightmaps too). Static copies so they don't clash with the front end's stb_image (ui/StbImpl.cpp)
+// Core-side PNG decode (headless servers load heightmaps too). Static copies so they don't clash with the front end's stb_image (ui/StbImpl.cpp)
 #pragma warning(push, 0)
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO
 #include "stb_image.h"
-#define STB_IMAGE_WRITE_STATIC
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STBI_WRITE_NO_STDIO
-#include "stb_image_write.h"
 #pragma warning(pop)
 
 namespace mealkit::asset {
@@ -39,18 +35,6 @@ Grid gridOf(const Heightmap& map, Vec3 center, Vec3 size) {
 }
 
 f32 sampleMeters(const Heightmap& map, u32 x, u32 z, f32 height) { return static_cast<f32>(map.at(x, z)) * (height / kMaxSample); }
-
-void putU32(std::vector<u8>& out, u32 v) {
-    for (int i = 3; i >= 0; --i) out.push_back(static_cast<u8>(v >> (i * 8)));
-}
-
-void chunk(std::vector<u8>& out, const char* type, const u8* data, size_t size) {
-    putU32(out, static_cast<u32>(size));
-    const size_t start = out.size();
-    out.insert(out.end(), type, type + 4);
-    if (size) out.insert(out.end(), data, data + size);
-    putU32(out, crc32(out.data() + start, out.size() - start));
-}
 
 } // namespace
 
@@ -107,50 +91,6 @@ bool loadHeightmap(const std::string& file, Heightmap& out, std::string& error) 
         return false;
     }
     return decodeHeightmap(bytes.data(), bytes.size(), out, error);
-}
-
-std::vector<u8> encodeHeightmap(const Heightmap& map) {
-    const u32 n = map.size;
-    std::vector<u8> raw; // filter byte 0 + big-endian 16-bit samples per row
-    raw.reserve(static_cast<size_t>(n) * (n * 2 + 1));
-    for (u32 row = 0; row < n; ++row) {
-        raw.push_back(0);
-        const u32 z = n - 1 - row;
-        for (u32 x = 0; x < n; ++x) {
-            const u16 s = map.at(x, z);
-            raw.push_back(static_cast<u8>(s >> 8));
-            raw.push_back(static_cast<u8>(s & 0xFF));
-        }
-    }
-    int zlen = 0;
-    unsigned char* zlib = stbi_zlib_compress(raw.data(), static_cast<int>(raw.size()), &zlen, 8);
-    std::vector<u8> out = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
-    std::vector<u8> header;
-    putU32(header, n);
-    putU32(header, n);
-    header.insert(header.end(), {16, 0, 0, 0, 0}); // 16-bit, grayscale, deflate, adaptive filters, no interlace
-    chunk(out, "IHDR", header.data(), header.size());
-    chunk(out, "IDAT", zlib, static_cast<size_t>(zlen));
-    chunk(out, "IEND", nullptr, 0);
-    STBIW_FREE(zlib);
-    return out;
-}
-
-bool saveHeightmap(const std::string& file, const Heightmap& map, std::string& error) {
-    if (!map.valid()) {
-        error = "empty heightmap";
-        return false;
-    }
-    const std::vector<u8> png = encodeHeightmap(map);
-    FILE* f = openFile(file, "wb");
-    if (!f) {
-        error = "cannot write " + file;
-        return false;
-    }
-    const bool ok = fwrite(png.data(), 1, png.size(), f) == png.size();
-    fclose(f);
-    if (!ok) error = "cannot write " + file;
-    return ok;
 }
 
 void terrainHeights(const Heightmap& map, f32 height, std::vector<f32>& out) {
@@ -284,55 +224,6 @@ void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod,
     skirt([&](u32 k) { return (rows - 1) * w + k; }, w);
     skirt([&](u32 k) { return k * w; }, rows);
     skirt([&](u32 k) { return k * w + w - 1; }, rows);
-}
-
-SampleRect applyBrush(Heightmap& map, Vec3 center, Vec3 size, TerrainBrush brush, Vec3 point, f32 radius, f32 amount,
-                      u16 flattenTo) {
-    SampleRect rect;
-    if (!map.valid() || radius <= 0.0f) return rect;
-    const Grid g = gridOf(map, center, size);
-    const i32 last = static_cast<i32>(map.size - 1);
-    const i32 x0 = std::clamp(static_cast<i32>(std::floor((point.x - radius - g.origin.x) / g.dx)), 0, last);
-    const i32 x1 = std::clamp(static_cast<i32>(std::ceil((point.x + radius - g.origin.x) / g.dx)), 0, last);
-    const i32 z0 = std::clamp(static_cast<i32>(std::floor((point.z - radius - g.origin.z) / g.dz)), 0, last);
-    const i32 z1 = std::clamp(static_cast<i32>(std::ceil((point.z + radius - g.origin.z) / g.dz)), 0, last);
-    if (x0 > x1 || z0 > z1) return rect;
-    thread_local std::vector<u16> source;
-    if (brush == TerrainBrush::Smooth) source = map.samples;
-    bool touched = false;
-    for (i32 z = z0; z <= z1; ++z)
-        for (i32 x = x0; x <= x1; ++x) {
-            const f32 px = g.origin.x + static_cast<f32>(x) * g.dx - point.x, pz = g.origin.z + static_cast<f32>(z) * g.dz - point.z;
-            const f32 dist = std::sqrt(px * px + pz * pz);
-            if (dist >= radius) continue;
-            const f32 t = 1.0f - dist / radius, weight = t * t * (3.0f - 2.0f * t);
-            u16& s = map.samples[static_cast<size_t>(z) * map.size + x];
-            f32 value = static_cast<f32>(s);
-            switch (brush) {
-            case TerrainBrush::Raise: value += amount * weight * kMaxSample; break;
-            case TerrainBrush::Lower: value -= amount * weight * kMaxSample; break;
-            case TerrainBrush::Flatten: value = lerp(value, static_cast<f32>(flattenTo), std::min(1.0f, amount * weight)); break;
-            case TerrainBrush::Smooth: {
-                f32 sum = 0.0f;
-                u32 count = 0;
-                for (i32 dz = -1; dz <= 1; ++dz)
-                    for (i32 dx = -1; dx <= 1; ++dx) {
-                        const i32 sx = x + dx, sz = z + dz;
-                        if (sx < 0 || sz < 0 || sx > last || sz > last) continue;
-                        sum += static_cast<f32>(source[static_cast<size_t>(sz) * map.size + sx]);
-                        ++count;
-                    }
-                value = lerp(value, sum / static_cast<f32>(count), std::min(1.0f, amount * weight));
-                break;
-            }
-            }
-            const u16 next = static_cast<u16>(std::lround(std::clamp(value, 0.0f, kMaxSample)));
-            if (next == s) continue;
-            s = next;
-            touched = true;
-        }
-    if (touched) rect = {static_cast<u32>(x0), static_cast<u32>(z0), static_cast<u32>(x1), static_cast<u32>(z1), false};
-    return rect;
 }
 
 } // namespace mealkit::asset

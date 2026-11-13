@@ -9,7 +9,7 @@
 // Heightmap terrain (scene kind scene::kTypeTerrain): 16-bit PNG heights filling the object's box.
 // Sample (x, z) sits at center + (-size.x/2 + x * size.x/(n-1), -size.y/2 + s/65535 * size.y, -size.z/2 + z * size.z/(n-1)).
 // The same samples feed the collision (physics::PhysicsWorld::createHeightField, integer decode, so the same on every PC),
-// the view's chunk meshes (same diagonal as Jolt's triangles) and the editor brushes.
+// and the view's chunk meshes (same diagonal as Jolt's triangles). Painting is MkRender's (mkterrain), which writes the PNG.
 namespace mealkit::asset {
 
 // Samples in grid order: index = z * size + x, z = 0 at the -z edge (PNG rows are flipped on load/save: the image's top row is +z)
@@ -26,15 +26,12 @@ Heightmap flatHeightmap(u32 size, u16 value);
 // PNG (16-bit or 8-bit, any channel count: the first channel is read) → heightmap. Must be square
 bool decodeHeightmap(const u8* png, size_t bytes, Heightmap& out, std::string& error);
 bool loadHeightmap(const std::string& file, Heightmap& out, std::string& error);
-// 16-bit grayscale PNG (deflate)
-std::vector<u8> encodeHeightmap(const Heightmap& map);
-bool saveHeightmap(const std::string& file, const Heightmap& map, std::string& error);
 
 // Heights in meters above the box bottom, grid order (collision)
 void terrainHeights(const Heightmap& map, f32 height, std::vector<f32>& out);
 // Surface height (world y) at world x/z on the collision triangles. false outside the terrain
 bool terrainHeightAt(const Heightmap& map, Vec3 center, Vec3 size, f32 x, f32 z, f32* y);
-// First hit of a ray (dir normalized) with the surface: distance, or -1 if none within maxDistance (editor picking and brushes)
+// First hit of a ray (dir normalized) with the surface: distance, or -1 if none within maxDistance (editor picking)
 f32 raycastTerrain(const Heightmap& map, Vec3 center, Vec3 size, Vec3 origin, Vec3 dir, f32 maxDistance);
 
 // ---------------------------------------------------------------- View: chunk meshes
@@ -45,16 +42,5 @@ u32 terrainChunks(const Heightmap& map);      // chunks per side
 void buildTerrainChunk(const Heightmap& map, Vec3 size, u32 cx, u32 cz, u32 lod, MeshData& out);
 // LOD by distance from the camera to the chunk center (in chunk widths)
 u32 terrainLod(f32 distance, f32 chunkWidth);
-
-// ---------------------------------------------------------------- Editor brushes
-enum class TerrainBrush : u8 { Raise, Lower, Flatten, Smooth };
-struct SampleRect {
-    u32 x0 = 0, z0 = 0, x1 = 0, z1 = 0; // inclusive
-    bool empty = true;
-};
-// Brush at world point (x/z used) with radius (m) and smooth falloff. amount: fraction of the box height (Raise/Lower) or blend 0..1 (Flatten/Smooth),
-// already multiplied by the frame time. Flatten moves toward flattenTo (sample value). Returns the touched samples
-SampleRect applyBrush(Heightmap& map, Vec3 center, Vec3 size, TerrainBrush brush, Vec3 point, f32 radius, f32 amount,
-                      u16 flattenTo);
 
 } // namespace mealkit::asset

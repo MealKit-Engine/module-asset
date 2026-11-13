@@ -83,15 +83,4 @@ void groupScatter(Scatter& scatter) {
     scatter.grouped = true;
 }
 
-u32 eraseScatter(Scatter& scatter, Vec3 center, f32 radius) {
-    const size_t before = scatter.items.size();
-    std::erase_if(scatter.items, [&](const ScatterInstance& s) {
-        const f32 dx = s.position.x - center.x, dz = s.position.z - center.z;
-        return dx * dx + dz * dz < radius * radius;
-    });
-    const u32 removed = static_cast<u32>(before - scatter.items.size());
-    if (removed) scatter.grouped = false;
-    return removed;
-}
-
 } // namespace mealkit::asset

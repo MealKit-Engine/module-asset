@@ -49,7 +49,6 @@ struct Model {
 struct Terrain {
     std::string path; // relative to assets
     Heightmap map;
-    bool dirty = false; // edited in the editor and not written to the file yet
     unsigned long long fileTime = 0;
     // View
     Vec3 meshSize;                      // box size the meshes were built for (rebuilt when it changes)
@@ -105,25 +104,17 @@ public:
     MeshId pickLod(const Model& model, Vec3 cameraPos, Vec3 position, Vec3 scale) const;
 
     // Terrain heightmap (path relative to assets): loaded on first request, nullptr if missing/unreadable (warns once).
-    // Edits (editor brushes) change map in place, then terrainChanged marks the chunks to rebuild
+    // Painting is MkRender's; a changed file is reread by reloadChanged
     Terrain* terrain(const std::string& path);
-    // Replaces (or creates, not yet on disk) a terrain's heightmap: new terrains and imported PNGs in the editor. dirty = not written yet
-    Terrain& setTerrain(const std::string& path, Heightmap map, bool dirty);
-    void terrainChanged(Terrain& terrain, const SampleRect& rect);
-    // Writes edited terrains to their files (editor scene save). false if any failed (reasons in error)
-    bool saveTerrains(std::string& error);
     // Builds the terrain's stale chunk meshes for this box size (first use, edits, a new size). false without a GPU or heightmap.
     // render::addTerrain calls it outside a frame and then draws terrain.meshes
     bool buildTerrainMeshes(Terrain& terrain, Vec3 size);
 
-    // Scatter layer instances (.scatter relative to assets): loaded on first request; a missing file is an empty layer (painted later).
-    // Edits change items in place and set dirty; saveScatters writes them (editor scene save)
+    // Scatter layer instances (.scatter relative to assets): loaded on first request; a missing file is an empty layer (painted in MkRender)
     struct ScatterEntry {
         Scatter scatter;
-        bool dirty = false;
     };
     ScatterEntry& scatter(const std::string& path);
-    bool saveScatters(std::string& error);
     // Hash of the simulation data of the models the scene references: physics hull points and terrain heightmaps
     // (combined with scene.contentHash() for connection checks; visual meshes, textures and materials aren't included, so platform cooking doesn't change it).
     u64 hashModels(const scene::Scene& scene);

@@ -395,7 +395,7 @@ std::vector<std::string> ModelCache::reloadChanged() {
     for (auto it = m_terrains.begin(); it != m_terrains.end();) { // re-exported heightmaps (edited ones are kept)
         const std::string file = resolve(it->first);
         const unsigned long long time = file.empty() ? 0 : fileWriteTime(file);
-        const bool same = it->second ? (it->second->dirty || time == it->second->fileTime) : time == 0;
+        const bool same = it->second ? time == it->second->fileTime : time == 0;
         if (same) ++it;
         else it = m_terrains.erase(it); // reloaded on the next request (old GPU meshes remain, like models)
     }
@@ -445,49 +445,6 @@ Terrain* ModelCache::terrain(const std::string& path) {
     return out;
 }
 
-Terrain& ModelCache::setTerrain(const std::string& path, Heightmap map, bool dirty) {
-    std::unique_ptr<Terrain>& slot = m_terrains[path];
-    if (!slot) slot = std::make_unique<Terrain>();
-    slot->path = path;
-    slot->map = std::move(map);
-    slot->dirty = dirty;
-    slot->chunks = 0; // rebuild everything (the size may differ; existing mesh ids are reused)
-    return *slot;
-}
-
-void ModelCache::terrainChanged(Terrain& t, const SampleRect& rect) {
-    if (rect.empty) return;
-    t.dirty = true;
-    if (t.chunks == 0) return;
-    // A sample is shared by the chunks on both sides of it and changes its neighbours' normals
-    auto chunkOf = [&](u32 s) { return std::min(s / kTerrainChunkCells, t.chunks - 1); };
-    const u32 x0 = chunkOf(rect.x0 > 0 ? rect.x0 - 1 : 0), x1 = chunkOf(rect.x1 + 1);
-    const u32 z0 = chunkOf(rect.z0 > 0 ? rect.z0 - 1 : 0), z1 = chunkOf(rect.z1 + 1);
-    for (u32 z = z0; z <= z1; ++z)
-        for (u32 x = x0; x <= x1; ++x) t.stale[z * t.chunks + x] = 1;
-}
-
-bool ModelCache::saveTerrains(std::string& error) {
-    bool ok = true;
-    for (auto& [path, t] : m_terrains) {
-        if (!t || !t->dirty) continue;
-        std::string file = resolve(path);
-        if (file.empty()) { // new file next to the other assets
-            file = assetsRoot() + "/" + path;
-            createDirectories(file.substr(0, file.find_last_of("/\\")));
-        }
-        std::string reason;
-        if (!saveHeightmap(file, t->map, reason)) {
-            error += path + ": " + reason + "\n";
-            ok = false;
-            continue;
-        }
-        t->dirty = false;
-        t->fileTime = fileWriteTime(file);
-    }
-    return ok;
-}
-
 bool ModelCache::buildTerrainMeshes(Terrain& t, Vec3 size) {
     if (!m_gpu || !t.map.valid()) return false;
     const u32 chunks = terrainChunks(t.map);
@@ -521,26 +478,6 @@ ModelCache::ScatterEntry& ModelCache::scatter(const std::string& path) {
     std::string error;
     if (!file.empty() && !loadScatter(file, slot->scatter, error)) MEALKIT_WARN("Scatter %s: %s", path.c_str(), error.c_str());
     return *slot;
-}
-
-bool ModelCache::saveScatters(std::string& error) {
-    bool ok = true;
-    for (auto& [path, entry] : m_scatters) {
-        if (!entry || !entry->dirty || path.empty()) continue;
-        std::string file = resolve(path);
-        if (file.empty()) {
-            file = assetsRoot() + "/" + path;
-            createDirectories(file.substr(0, file.find_last_of("/\\")));
-        }
-        std::string reason;
-        if (!saveScatter(file, entry->scatter, reason)) {
-            error += path + ": " + reason + "\n";
-            ok = false;
-            continue;
-        }
-        entry->dirty = false;
-    }
-    return ok;
 }
 
 u64 ModelCache::hashModels(const scene::Scene& scene) {

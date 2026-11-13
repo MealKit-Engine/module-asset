@@ -3,7 +3,7 @@
 @format module 1
 type engine
 name asset
-version 0.2.0
+version 0.3.0
 engine 0.9
 kind sim
 layer core
