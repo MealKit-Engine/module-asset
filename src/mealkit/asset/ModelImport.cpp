@@ -63,11 +63,18 @@ u32 encodeColor(const f32 linear[4]) {
 // Material list within the model (vertex material is an index into this list while loading, changed to the renderer index after upload)
 struct Materials {
     std::vector<const cgltf_material*> list; // nullptr = primitive without material (default)
+    std::vector<std::vector<std::string>> meshes; // per material: names of the glTF meshes using it (file order, each once)
     u16 index(const cgltf_material* m) {
         for (size_t i = 0; i < list.size(); ++i)
             if (list[i] == m) return static_cast<u16>(i);
         list.push_back(m);
+        meshes.emplace_back();
         return static_cast<u16>(list.size() - 1);
+    }
+    void use(u16 material, const char* meshName) {
+        std::vector<std::string>& names = meshes[material];
+        const std::string name = meshName && *meshName ? meshName : "?";
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
     }
 };
 
@@ -96,8 +103,8 @@ u32 packWeights(const f32 w[4]) {
     return q[0] | (q[1] << 8) | (q[2] << 16) | (q[3] << 24);
 }
 
-void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData& out, bool& hadNormals, Materials& materials,
-                     const SkinState* skin, i32 rigidJoint) {
+void appendPrimitive(const cgltf_primitive& prim, const char* meshName, const f32 world[16], MeshData& out, bool& hadNormals,
+                     Materials& materials, const SkinState* skin, i32 rigidJoint) {
     if (prim.type != cgltf_primitive_type_triangles) return;
     const cgltf_accessor* positions = nullptr;
     const cgltf_accessor* normals = nullptr;
@@ -117,6 +124,7 @@ void appendPrimitive(const cgltf_primitive& prim, const f32 world[16], MeshData&
     if (!positions) return;
     hadNormals = hadNormals && normals != nullptr;
     const u16 material = materials.index(prim.material); // base color is in the material table (vertex color is COLOR_0 only)
+    materials.use(material, meshName);
 
     // Column-major matrix. If the determinant is negative it's a mirror transform, so the winding order is flipped once more.
     const f32* m = world;
@@ -175,7 +183,7 @@ void visitNode(const cgltf_node* node, MeshData& out, bool& hadNormals, Material
         }
         const i32 rigid = skin ? skin->jointOf(node) : 0;
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i)
-            appendPrimitive(node->mesh->primitives[i], world, out, hadNormals, materials, skin, rigid);
+            appendPrimitive(node->mesh->primitives[i], node->mesh->name, world, out, hadNormals, materials, skin, rigid);
     }
     for (cgltf_size i = 0; i < node->children_count; ++i) visitNode(node->children[i], out, hadNormals, materials, skin);
 }
@@ -301,9 +309,12 @@ AnimationClip bakeClip(const cgltf_animation& anim, const SkinState& state, cons
 }
 
 // Material features outside the supported range (warned and ignored on load, docs/CODING_MODEL.md "Models, materials, textures")
-void warnUnsupported(const std::string& path, const cgltf_material& m) {
+void warnUnsupported(const std::string& path, const cgltf_material& m, std::vector<std::string>& ignored) {
     const char* name = m.name ? m.name : "?";
-    const auto warn = [&](const char* what) { MEALKIT_WARN("Model %s, material '%s': %s is not supported (ignored)", path.c_str(), name, what); };
+    const auto warn = [&](const char* what) {
+        MEALKIT_WARN("Model %s, material '%s': %s is not supported (ignored)", path.c_str(), name, what);
+        ignored.push_back(std::string(what) + " is not supported (ignored)");
+    };
     if (m.has_pbr_specular_glossiness) warn("specular-glossiness");
     if (m.has_clearcoat) warn("clearcoat");
     if (m.has_transmission || m.has_diffuse_transmission || m.has_volume) warn("transmission");
@@ -463,7 +474,13 @@ bool importModel(const std::string& path, CookedModel& model, TextureCompressor 
     }
 
     // Materials and their textures (compressed here, uploaded by ModelCache). Vertex material stays the index into model.materials
-    for (const cgltf_material* m : materials.list) if (m) warnUnsupported(path, *m);
+    model.notes.resize(materials.list.size());
+    for (size_t i = 0; i < materials.list.size(); ++i) {
+        const cgltf_material* m = materials.list[i];
+        model.notes[i].name = m && m->name ? m->name : "";
+        model.notes[i].meshes = materials.meshes[i];
+        if (m) warnUnsupported(path, *m, model.notes[i].ignored);
+    }
     {
         std::vector<std::pair<const cgltf_image*, TextureUsage>> keys;
         std::vector<u32> loaded;
@@ -487,7 +504,8 @@ bool importModel(const std::string& path, CookedModel& model, TextureCompressor 
             loaded.push_back(index);
             return index;
         };
-        for (const cgltf_material* m : materials.list) {
+        for (size_t materialIndex = 0; materialIndex < materials.list.size(); ++materialIndex) {
+            const cgltf_material* m = materials.list[materialIndex];
             MaterialData md;
             if (m) {
                 const cgltf_pbr_metallic_roughness& pbr = m->pbr_metallic_roughness;
@@ -507,8 +525,10 @@ bool importModel(const std::string& path, CookedModel& model, TextureCompressor 
                 if (m->alpha_mode == cgltf_alpha_mode_mask) md.alphaCutoff = std::max(m->alpha_cutoff, 1e-3f);
                 std::vector<std::string> problems; // style preset material features (Blender custom properties → extras)
                 applyMaterialExtras(m->extras.data, md, problems);
-                for (const std::string& p : problems)
+                for (const std::string& p : problems) {
                     MEALKIT_WARN("Model %s, material '%s': %s", path.c_str(), m->name ? m->name : "?", p.c_str());
+                    model.notes[materialIndex].ignored.push_back(p);
+                }
             }
             model.materials.push_back(md);
         }

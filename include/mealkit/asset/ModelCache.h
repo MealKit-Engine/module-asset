@@ -23,6 +23,23 @@ namespace mealkit::asset {
 
 inline constexpr u32 kMaxLods = 3;
 
+// One texture slot of a material, as loaded (size and format after compression)
+struct MaterialTextureInfo {
+    bool present = false;
+    u32 width = 0, height = 0;
+    TextureFormat format = TextureFormat::Bc7Srgb;
+};
+
+// Read-only description of a loaded model's material (the [Materials] page of [Look Dev]; nothing here is written back, values stay in Blender)
+struct MaterialInfo {
+    std::string name;
+    MaterialData data;                 // factors and features; texture fields are not used (see textures)
+    MaterialTextureInfo textures[4];   // base color, normal, metallic-roughness, emissive
+    std::vector<std::string> meshes;   // glTF mesh names using it
+    std::vector<std::string> ignored;  // what loading ignored (English)
+    u32 gpuIndex = 0;                  // the renderer's material table index (vertex material of the lods; 0 without a renderer)
+};
+
 struct Model {
     bool valid = false;
     std::string path; // path as written in the scene (relative to assets)
@@ -35,6 +52,7 @@ struct Model {
     // Asset budget (asset/Budget.h): kind from the path's folder, usage counted on load. Exceeded items go in budgetProblems (empty = within budget)
     ModelKind kind = ModelKind::Prop;
     u32 materials = 0;
+    std::vector<MaterialInfo> materialInfo; // one per glTF material, in file order
     u32 bones = 0;       // joint count of the skin (over kMaxJoints, the skin is dropped and it becomes a static model)
     // Skeletal animation (asset/Animation.h): with a skin, lods[0] alone is the skinned mesh (no LODs), clips are the glTF animations
     Skeleton skeleton;

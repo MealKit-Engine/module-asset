@@ -329,6 +329,21 @@ bool ModelCache::load(const std::string& path, Model& out) {
                 *t = *t < textureIds.size() ? textureIds[*t] : kNoTexture;
             remap[i] = static_cast<u16>(m_gpu->createMaterial(md));
         }
+    for (size_t i = 0; i < cooked.materials.size(); ++i) {
+        MaterialInfo info;
+        info.data = cooked.materials[i];
+        if (i < cooked.notes.size()) {
+            info.name = std::move(cooked.notes[i].name);
+            info.meshes = std::move(cooked.notes[i].meshes);
+            info.ignored = std::move(cooked.notes[i].ignored);
+        }
+        const u32 slots[4] = {info.data.baseColorTexture, info.data.normalTexture, info.data.metallicRoughnessTexture, info.data.emissiveTexture};
+        for (int s = 0; s < 4; ++s)
+            if (slots[s] < cooked.textures.size())
+                info.textures[s] = {true, cooked.textures[slots[s]].width, cooked.textures[slots[s]].height, cooked.textures[slots[s]].format};
+        info.gpuIndex = remap[i];
+        model.materialInfo.push_back(std::move(info));
+    }
     std::vector<MeshData>& lods = cooked.lods;
     for (MeshData& lod : lods)
         for (Vertex& v : lod.vertices) v.material = v.material < remap.size() ? remap[v.material] : 0;
