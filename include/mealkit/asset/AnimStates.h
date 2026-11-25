@@ -19,6 +19,9 @@
 //   row pawn.move
 //   clip idle 0 run 3              ← 1D blend: "clip value" pairs, blended by blendParam
 //   blendParam speed
+//   clip idle 0 0 walk 0 1 left -1 1   ← 2D blend space (blendParam2 set): "clip x y" triples, inverse-distance weights over (blendParam, blendParam2)
+//   blendParam2 turn
+//   rootMotion hips                ← root motion (visual offset): this joint's horizontal travel is taken out of the pose, see animRootDelta
 //   transitions idle if speed < 0.3
 //   events 0 Footstep 0.5 Footstep ← "cycle fraction (0..1) feedback row" pairs
 //   row pawn.wave
@@ -31,8 +34,10 @@
 namespace mealkit::asset {
 
 MEALKIT_STRUCT(AnimState) {
-    MEALKIT_FIELD(std::string, clip, {}, "Clip, or 1D blend \"clip value clip value\"");
-    MEALKIT_FIELD(std::string, blendParam, {}, "Blend parameter (1D blend)");
+    MEALKIT_FIELD(std::string, clip, {}, "Clip, 1D blend \"clip value clip value\" or 2D blend \"clip x y clip x y\"");
+    MEALKIT_FIELD(std::string, blendParam, {}, "Blend parameter (1D blend, x of a 2D blend space)");
+    MEALKIT_FIELD(std::string, blendParam2, {}, "Second blend parameter (y of a 2D blend space)");
+    MEALKIT_FIELD(std::string, rootMotion, {}, "Root joint whose horizontal travel becomes root motion (empty: none)");
     MEALKIT_FIELD(bool, loop, true, "Loop");
     MEALKIT_FIELD(f32, speed, 1.0f, "Playback speed");
     MEALKIT_FIELD(f32, blendIn, 0.15f, "Blend time when entering (s)");
@@ -70,11 +75,13 @@ public:
     struct Point {
         std::string clip;
         f32 at = 0.0f;
+        f32 at2 = 0.0f; // y of a 2D blend space
     };
     struct State {
         std::string name;
         std::vector<Point> points; // 1 = single clip, more = 1D blend (sorted by at)
-        std::string blendParam;
+        std::string blendParam, blendParam2; // blendParam2 set = 2D blend space (points are not sorted)
+        std::string rootMotion;
         bool loop = true;
         f32 speed = 1.0f;
         f32 blendIn = 0.15f;
@@ -110,6 +117,9 @@ struct AnimInstance {
     u32 state = 0, from = 0;
     f32 phase = 0.0f, fromPhase = 0.0f; // cycles played (looping: wraps by 1)
     f32 blend = 0.0f, fromBlend = 0.0f; // blend parameter value at the last update
+    f32 blend2 = 0.0f, fromBlend2 = 0.0f;
+    f32 prevPhase = 0.0f;               // phase before the last update (for root motion)
+    bool wrapped = false;               // the last update wrapped a looping phase past 1
     f32 fade = 1.0f;                    // 0..1 progress from `from` to `state`
     f32 fadeSeconds = 0.0f;
 };
@@ -121,5 +131,11 @@ void updateAnim(const AnimStates& states, i32 set, const std::vector<AnimationCl
 // Current pose (rest pose if not started)
 void animPose(const AnimStates& states, const Skeleton& skeleton, const std::vector<AnimationClip>& clips,
               const AnimInstance& anim, std::vector<JointPose>& out);
+
+// Root motion of the last updateAnim, as a visual offset (docs/DECISIONS.md 2026-11-25): the horizontal travel of the current state's
+// rootMotion joint over that update, in skeleton space, summed over the blended clips. The pose from animPose has this travel taken out
+// (animPose strips the joint), so the character stays on the simulation position; add the delta to an asset::RootOffset (optionally through
+// a MotionWarp) and draw the model displaced by it. Zero for states without rootMotion. A fading-out state contributes nothing
+Vec3 animRootDelta(const AnimStates& states, const Skeleton& skeleton, const std::vector<AnimationClip>& clips, const AnimInstance& anim);
 
 } // namespace mealkit::asset

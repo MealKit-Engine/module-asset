@@ -1,5 +1,7 @@
 #include "mealkit/asset/AnimStates.h"
 
+#include "mealkit/asset/AnimIk.h"
+
 #include "mealkit/core/Log.h"
 #include "mealkit/data/Tables.h"
 #include "mealkit/platform/Paths.h"
@@ -65,36 +67,63 @@ bool parseCond(const std::vector<std::string_view>& w, AnimStates::Cond& out) {
 
 const AnimationClip* clipOf(const std::vector<AnimationClip>& clips, const AnimStates::Point& p) { return findClip(clips, p.clip); }
 
-// Bracketing blend points and the weight between them for a parameter value
-void bracket(const AnimStates::State& s, f32 value, u32& a, u32& b, f32& weight) {
-    a = b = 0;
-    weight = 0.0f;
+struct Weight {
+    u32 point;
+    f32 weight;
+};
+
+// Blend weights of a state's points for the parameter values: 1D = the two bracketing points, 2D = inverse squared distance
+void weightsOf(const AnimStates::State& s, f32 x, f32 y, std::vector<Weight>& out) {
+    out.clear();
     const u32 n = static_cast<u32>(s.points.size());
-    if (n < 2 || value <= s.points[0].at) return;
-    if (value >= s.points[n - 1].at) {
-        a = b = n - 1;
+    if (n == 0) return;
+    if (n == 1) {
+        out.push_back({0, 1.0f});
+        return;
+    }
+    if (!s.blendParam2.empty()) {
+        f32 total = 0.0f;
+        for (u32 i = 0; i < n; ++i) {
+            const f32 dx = x - s.points[i].at, dy = y - s.points[i].at2;
+            const f32 d2 = dx * dx + dy * dy;
+            if (d2 < 1e-8f) { // on a point: exactly that clip
+                out.assign(1, {i, 1.0f});
+                return;
+            }
+            out.push_back({i, 1.0f / d2});
+            total += out.back().weight;
+        }
+        for (Weight& w : out) w.weight /= total;
+        return;
+    }
+    if (x <= s.points[0].at) {
+        out.push_back({0, 1.0f});
+        return;
+    }
+    if (x >= s.points[n - 1].at) {
+        out.push_back({n - 1, 1.0f});
         return;
     }
     for (u32 i = 1; i < n; ++i)
-        if (value <= s.points[i].at) {
-            a = i - 1;
-            b = i;
-            const f32 span = s.points[b].at - s.points[a].at;
-            weight = span > 0.0f ? (value - s.points[a].at) / span : 0.0f;
+        if (x <= s.points[i].at) {
+            const f32 span = s.points[i].at - s.points[i - 1].at;
+            const f32 w = span > 0.0f ? (x - s.points[i - 1].at) / span : 0.0f;
+            out.push_back({i - 1, 1.0f - w});
+            if (w > 0.0f) out.push_back({i, w});
             return;
         }
 }
 
-// Seconds of one cycle (blend: lerp of the two active clips' lengths)
-f32 cycleSeconds(const AnimStates::State& s, const std::vector<AnimationClip>& clips, f32 blend) {
-    if (s.points.empty()) return 0.0f;
-    u32 a, b;
-    f32 w;
-    bracket(s, blend, a, b, w);
-    const AnimationClip* ca = clipOf(clips, s.points[a]);
-    const AnimationClip* cb = clipOf(clips, s.points[b]);
-    const f32 da = ca ? ca->duration : 0.0f, db = cb ? cb->duration : 0.0f;
-    return da + (db - da) * w;
+// Seconds of one cycle (blend: weighted mean of the active clips' lengths)
+f32 cycleSeconds(const AnimStates::State& s, const std::vector<AnimationClip>& clips, f32 x, f32 y) {
+    thread_local std::vector<Weight> weights;
+    weightsOf(s, x, y, weights);
+    f32 seconds = 0.0f;
+    for (const Weight& w : weights) {
+        const AnimationClip* c = clipOf(clips, s.points[w.point]);
+        seconds += (c ? c->duration : 0.0f) * w.weight;
+    }
+    return seconds;
 }
 
 bool finished(const AnimStates::State& s, f32 phase) { return !s.loop && phase >= 1.0f; }
@@ -120,9 +149,9 @@ bool passes(const AnimStates::Transition& t, const AnimStates::State& s, f32 pha
 }
 
 // Advances phase by dt; fires events crossed in (old, new]
-void advance(const AnimStates::State& s, const std::vector<AnimationClip>& clips, f32 blend, f32 dt, f32& phase,
-             std::vector<std::string>* events) {
-    const f32 seconds = cycleSeconds(s, clips, blend);
+void advance(const AnimStates::State& s, const std::vector<AnimationClip>& clips, f32 blend, f32 blend2, f32 dt, f32& phase,
+             std::vector<std::string>* events, bool* wrapped = nullptr) {
+    const f32 seconds = cycleSeconds(s, clips, blend, blend2);
     const f32 before = phase;
     phase += seconds > 0.0f ? dt * s.speed / seconds : 0.0f;
     if (!s.loop) phase = std::min(phase, 1.0f);
@@ -130,25 +159,30 @@ void advance(const AnimStates::State& s, const std::vector<AnimationClip>& clips
         for (const auto& [at, name] : s.events)
             for (f32 k = std::floor(before - at) + 1.0f; k + at <= phase; k += 1.0f)
                 if (k + at > before) events->push_back(name);
-    if (s.loop && phase >= 1.0f) phase -= std::floor(phase);
+    if (s.loop && phase >= 1.0f) {
+        phase -= std::floor(phase);
+        if (wrapped) *wrapped = true;
+    }
 }
 
 void statePose(const AnimStates::State& s, const Skeleton& skeleton, const std::vector<AnimationClip>& clips, f32 phase,
-               f32 blend, std::vector<JointPose>& out) {
-    thread_local std::vector<JointPose> second;
+               f32 blend, f32 blend2, std::vector<JointPose>& out) {
+    thread_local std::vector<JointPose> next;
+    thread_local std::vector<Weight> weights;
     if (s.points.empty()) return restPose(skeleton, out);
-    u32 a, b;
-    f32 w;
-    bracket(s, blend, a, b, w);
-    const auto sample = [&](u32 point, std::vector<JointPose>& pose) {
-        const AnimationClip* clip = clipOf(clips, s.points[point]);
-        if (clip) samplePose(skeleton, *clip, phase * clip->duration, s.loop, pose);
-        else restPose(skeleton, pose);
-    };
-    sample(a, out);
-    if (a == b || w <= 0.0f) return;
-    sample(b, second);
-    blendPoses(out, second, w, out); // per joint, so out may alias a
+    weightsOf(s, blend, blend2, weights);
+    f32 sum = 0.0f;
+    for (const Weight& w : weights) {
+        if (w.weight <= 0.0f) continue;
+        std::vector<JointPose>& dst = sum == 0.0f ? out : next;
+        const AnimationClip* clip = clipOf(clips, s.points[w.point]);
+        if (clip) samplePose(skeleton, *clip, phase * clip->duration, s.loop, dst);
+        else restPose(skeleton, dst);
+        if (sum > 0.0f) blendPoses(out, next, w.weight / (sum + w.weight), out); // per joint, so out may alias a
+        sum += w.weight;
+    }
+    if (sum == 0.0f) restPose(skeleton, out);
+    if (!s.rootMotion.empty()) stripRootMotion(skeleton, findJoint(skeleton, s.rootMotion), out);
 }
 
 } // namespace
@@ -194,20 +228,25 @@ void AnimStates::build(const sim::Table<AnimState>& table, std::string* warnings
         State state;
         state.name = id.substr(dot + 1);
         state.blendParam = row.blendParam;
+        state.blendParam2 = row.blendParam2;
+        state.rootMotion = row.rootMotion;
         state.loop = row.loop;
         state.speed = row.speed;
         state.blendIn = std::max(0.0f, row.blendIn);
         const std::vector<std::string_view> clip = words(row.clip);
+        const bool blend2d = !row.blendParam2.empty();
+        const size_t stride = blend2d ? 3 : 2;
         if (clip.size() == 1) {
-            state.points.push_back({std::string(clip[0]), 0.0f});
+            state.points.push_back({std::string(clip[0]), 0.0f, 0.0f});
         } else {
-            for (size_t i = 0; i + 1 < clip.size(); i += 2) {
-                Point p{std::string(clip[i]), 0.0f};
-                if (number(clip[i + 1], p.at)) state.points.push_back(std::move(p));
-                else warn(warnings, "row " + id + ": blend value '" + std::string(clip[i + 1]) + "' is not a number");
+            for (size_t i = 0; i + stride - 1 < clip.size(); i += stride) {
+                Point p{std::string(clip[i]), 0.0f, 0.0f};
+                if (number(clip[i + 1], p.at) && (!blend2d || number(clip[i + 2], p.at2))) state.points.push_back(std::move(p));
+                else warn(warnings, "row " + id + ": blend value for '" + std::string(clip[i]) + "' is not a number");
             }
-            if (clip.size() % 2) warn(warnings, "row " + id + ": blend clip without a value");
-            std::stable_sort(state.points.begin(), state.points.end(), [](const Point& x, const Point& y) { return x.at < y.at; });
+            if (clip.size() % stride) warn(warnings, "row " + id + ": blend clip without " + (blend2d ? "x and y values" : "a value"));
+            if (!blend2d)
+                std::stable_sort(state.points.begin(), state.points.end(), [](const Point& x, const Point& y) { return x.at < y.at; });
         }
         const std::vector<std::string_view> ev = words(row.events);
         for (size_t i = 0; i + 1 < ev.size(); i += 2) {
@@ -307,6 +346,7 @@ void updateAnim(const AnimStates& states, i32 set, const std::vector<AnimationCl
         anim.from = anim.state;
         anim.fromPhase = anim.phase;
         anim.fromBlend = anim.blend;
+        anim.fromBlend2 = anim.blend2;
         anim.state = t.target;
         anim.phase = 0.0f;
         current = &s.states[anim.state];
@@ -316,9 +356,12 @@ void updateAnim(const AnimStates& states, i32 set, const std::vector<AnimationCl
     }
     params.triggers.clear();
     anim.blend = current->blendParam.empty() ? 0.0f : params.get(current->blendParam);
-    advance(*current, clips, anim.blend, dt, anim.phase, events);
+    anim.blend2 = current->blendParam2.empty() ? 0.0f : params.get(current->blendParam2);
+    anim.prevPhase = anim.phase;
+    anim.wrapped = false;
+    advance(*current, clips, anim.blend, anim.blend2, dt, anim.phase, events, &anim.wrapped);
     if (anim.fade < 1.0f) {
-        advance(s.states[anim.from], clips, anim.fromBlend, dt, anim.fromPhase, nullptr); // fading-out state fires no events
+        advance(s.states[anim.from], clips, anim.fromBlend, anim.fromBlend2, dt, anim.fromPhase, nullptr); // fading-out state fires no events
         anim.fade = std::min(1.0f, anim.fade + dt / anim.fadeSeconds);
     }
 }
@@ -328,11 +371,33 @@ void animPose(const AnimStates& states, const Skeleton& skeleton, const std::vec
     if (anim.set < 0 || static_cast<u32>(anim.set) >= states.setCount()) return restPose(skeleton, out);
     const AnimStates::Set& s = states.set(static_cast<u32>(anim.set));
     if (anim.state >= s.states.size()) return restPose(skeleton, out);
-    statePose(s.states[anim.state], skeleton, clips, anim.phase, anim.blend, out);
+    statePose(s.states[anim.state], skeleton, clips, anim.phase, anim.blend, anim.blend2, out);
     if (anim.fade >= 1.0f || anim.from >= s.states.size()) return;
     thread_local std::vector<JointPose> before;
-    statePose(s.states[anim.from], skeleton, clips, anim.fromPhase, anim.fromBlend, before);
+    statePose(s.states[anim.from], skeleton, clips, anim.fromPhase, anim.fromBlend, anim.fromBlend2, before);
     blendPoses(before, out, anim.fade, out);
+}
+
+Vec3 animRootDelta(const AnimStates& states, const Skeleton& skeleton, const std::vector<AnimationClip>& clips, const AnimInstance& anim) {
+    if (anim.set < 0 || static_cast<u32>(anim.set) >= states.setCount()) return {};
+    const AnimStates::Set& set = states.set(static_cast<u32>(anim.set));
+    if (anim.state >= set.states.size()) return {};
+    const AnimStates::State& s = set.states[anim.state];
+    if (s.rootMotion.empty()) return {};
+    const i32 joint = findJoint(skeleton, s.rootMotion);
+    if (joint < 0) return {};
+    thread_local std::vector<Weight> weights;
+    weightsOf(s, anim.blend, anim.blend2, weights);
+    Vec3 delta{};
+    for (const Weight& w : weights) {
+        const AnimationClip* clip = clipOf(clips, s.points[w.point]);
+        if (!clip) continue;
+        const f32 to = (anim.phase + (anim.wrapped ? 1.0f : 0.0f)) * clip->duration;
+        Vec3 d = clipRootDelta(skeleton, *clip, joint, anim.prevPhase * clip->duration, to, s.loop);
+        d.y = 0.0f; // only horizontal travel is taken out of the pose
+        delta += d * w.weight;
+    }
+    return delta;
 }
 
 } // namespace mealkit::asset
